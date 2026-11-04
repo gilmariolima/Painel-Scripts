@@ -1,0 +1,27 @@
+{
+  "name": "painel-teste",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Teste do instalador",
+  "author": "Gilmario Lima",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.gilmariolima.painelteste",
+    "productName": "Painel Teste",
+    "files": ["package.json", "main.js"],
+    "directories": { "output": "out" },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "executableName": "Painel Teste" },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "artifactName": "Painel-Teste-Setup-${version}.${ext}"
+    }
+  }
+}

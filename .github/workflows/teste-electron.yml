@@ -1,0 +1,38 @@
+name: Teste do instalador Electron
+
+on:
+  push:
+    tags: ["teste-electron-*", "teste-apagar-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  gerar:
+    if: startsWith(github.ref_name, 'teste-electron-')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: teste-electron
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx electron-builder --win --x64 --publish never
+      - name: Cria o pre-lancamento
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" out/Painel-Teste-Setup-0.0.1.exe --prerelease --latest=false --title "Teste do instalador (apagar)" --notes "Teste temporario."
+  apagar:
+    if: startsWith(github.ref_name, 'teste-apagar-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apaga o pre-lancamento
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release delete "${GITHUB_REF_NAME/teste-apagar-/teste-electron-}" --cleanup-tag --yes
