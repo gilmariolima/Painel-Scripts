@@ -1,4 +1,4 @@
-# Painel de Scripts (versão 6.5.6)
+# Painel de Scripts
 
 App para Windows (`PainelDeScripts.exe`). Abre o Edge ou o Chrome nos perfis do usuário e injeta
 userscripts no SmartBus (Guanabara) e na Tallos, sem precisar do Tampermonkey. O hub, que é a
@@ -30,13 +30,19 @@ página de controle, roda em http://127.0.0.1:47321.
 
 ```bash
 npm install
+npm test
 node gerar-modulos.js
 npm run build          # esbuild -> dist/painel.js
-npx @yao-pkg/pkg dist/painel.js -t node22-win-x64 --no-bytecode --public --public-packages "*" -o out/PainelDeScripts.exe
-node patch-gui.js out/PainelDeScripts.exe
+npm run empacotar      # pkg -> out/PainelDeScripts.exe, sem a janela preta
 ```
 
-Antes de gerar, suba a versão em `const VERSAO` (`src/app.js`) e o `@version` do módulo alterado.
+## Publicar uma versão
+
+1. Suba o `version` no `package.json` e no `package-lock.json`, e o `@version` do módulo alterado. A versão do app vem do `package.json`.
+2. Faça o commit e o push no `main`.
+3. Crie e envie a tag: `git tag v<versão>` e `git push origin v<versão>`.
+
+O workflow `publicar.yml` confere a versão, roda os testes, gera o exe e cria a Release com o `PainelDeScripts.exe`. No hub, o botão **Verificar atualizações** procura a última Release, baixa, troca o exe e reinicia. O repositório precisa ser público para o app baixar sem token.
 
 ## Dados no Windows
 

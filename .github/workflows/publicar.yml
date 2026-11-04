@@ -1,0 +1,41 @@
+# Publica uma versão nova em Releases, de onde o botão "Verificar atualizações" do hub baixa.
+# Dispara com a tag v<versão>, que tem de bater com o "version" do package.json.
+name: Publicar versão
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # Os módulos e o hub vão para dentro do exe: mantém as quebras de linha do repositório.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Confere a versão do package.json
+        shell: bash
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::A tag $GITHUB_REF_NAME não bate com a versão do package.json ($tag)."
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - run: node gerar-modulos.js
+      - run: npm run build
+      - run: npm run empacotar
+      - name: Cria a versão com o exe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" out/PainelDeScripts.exe --title "Painel de Scripts ${GITHUB_REF_NAME#v}" --generate-notes

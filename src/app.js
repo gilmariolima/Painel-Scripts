@@ -1,7 +1,6 @@
 // Painel de Scripts — executável com hub, usando o Microsoft Edge do usuário.
-// Abre o Edge com a porta de controle ligada, nos perfis já existentes
-// (Gilmario 1–6 para a SmartBus, Gilmario para a Tallos), e injeta o
-// Painel de Scripts nas abas da SmartBus e da Tallos.
+// Abre o Edge com a porta de controle ligada, nos perfis já existentes,
+// e injeta o Painel de Scripts nas abas da SmartBus e da Tallos.
 'use strict';
 
 const fs = require('fs');
@@ -22,8 +21,10 @@ const ICONE_ICO = Buffer.from(require('./icone/painel.ico'));
 const ICONE_PNG = Buffer.from(require('./icone/painel.png'));
 const CM_JS = require('./vendor/codemirror.js.txt');
 const CM_CSS = require('./vendor/codemirror.css.txt');
+const { version: VERSAO } = require('../package.json');
+const { procurarVersaoNova, baixarVersao, abrirExe } = require('./atualizador');
+const { criarVigiaOcioso } = require('./ocioso');
 
-const VERSAO = '6.5.6';
 const PORTA = Number(process.env.PAINEL_PORTA || 47321);
 const HUB_URL = `http://127.0.0.1:${PORTA}/`;
 
@@ -39,8 +40,6 @@ const SITES = Object.assign({
     smartbus: 'https://prod-guanabara-frontoffice-smartbus.smarttravelit.com/'
 }, process.env.PAINEL_SITES ? JSON.parse(process.env.PAINEL_SITES) : {});
 
-// Perfis do Edge usados por cada sistema (pelo nome que aparece no Edge)
-const PERFIS_SMARTBUS_PADRAO = ['Gilmario 1', 'Gilmario 2', 'Gilmario 3', 'Gilmario 4', 'Gilmario 5', 'Gilmario 6'];
 const PERFIL_TALLOS = 'Gilmario';
 
 const K = { painelEstado: 'tmm_painel_scripts_state_v1' };
@@ -396,11 +395,9 @@ const acharNavegador = (n = nav()) => n.exes().find(p => p && fs.existsSync(p)) 
 const LISTAS = { smartbus: 'perfisSmartbus', tallos: 'perfisTallos' };
 // Cada navegador tem as suas listas (no Chrome os perfis têm outros nomes)
 const chaveLista = site => LISTAS[site] + (nav().id === 'chrome' ? '_chrome' : '');
-const PADRAO = { smartbus: PERFIS_SMARTBUS_PADRAO, tallos: [PERFIL_TALLOS] };
 const perfisDe = site => {
     const lista = config[chaveLista(site)];
-    if (Array.isArray(lista)) return lista;
-    return nav().id === 'chrome' ? [] : PADRAO[site];
+    return Array.isArray(lista) ? lista : [];
 };
 const definirPerfis = (site, lista) => { config[chaveLista(site)] = lista; salvarConfig(); };
 const perfisSmartbus = () => perfisDe('smartbus');
@@ -1099,6 +1096,33 @@ async function rota(req, res) {
             setTimeout(() => { if (timerSalvar) salvarAgora(); process.exit(0); }, 300);
             return;
 
+        case '/api/atualizacao/verificar': {
+            if (!ehExe()) return responder(res, 400, { erro: 'A atualização só funciona no app instalado.' });
+            versaoEncontrada = await procurarVersaoNova({ atual: VERSAO, url: process.env.PAINEL_RELEASES_URL });
+            return responder(res, 200, { atual: VERSAO, nova: versaoEncontrada?.versao || null });
+        }
+
+        case '/api/atualizacao/instalar': {
+            if (!versaoEncontrada) return responder(res, 400, { erro: 'Verifique as atualizações primeiro.' });
+            if (instalandoVersao) return responder(res, 409, { erro: 'A atualização já está em andamento.' });
+            instalandoVersao = true;
+            try {
+                log(`Baixando a versão ${versaoEncontrada.versao}...`);
+                const conteudo = await baixarVersao(versaoEncontrada);
+                await fs.promises.mkdir(PASTA_ATUALIZACAO, { recursive: true });
+                const arq = path.join(PASTA_ATUALIZACAO, 'PainelDeScripts.exe');
+                await fs.promises.writeFile(arq, conteudo);
+                // O exe novo fecha este processo, troca o instalado e reabre (cuidarDaInstalacao).
+                await abrirExe(arq, [ARG_ATUALIZACAO], { cwd: PASTA_ATUALIZACAO });
+                return responder(res, 200, { ok: true });
+            } catch (e) {
+                log('Falha ao atualizar:', e.message);
+                return responder(res, 500, { erro: e.message });
+            } finally {
+                instalandoVersao = false;
+            }
+        }
+
         case '/api/registro':
             if (process.platform === 'win32') spawn('notepad.exe', [ARQ_LOG], { detached: true, stdio: 'ignore' }).unref();
             return responder(res, 200, { ok: true });
@@ -1342,6 +1366,11 @@ function pedirHubDaOutra() {
 const PASTA_APP = path.join(BASE, 'app');
 const EXE_APP = path.join(PASTA_APP, 'PainelDeScripts.exe');
 const ARQ_ICONE = path.join(PASTA_APP, 'painel.ico');
+const PASTA_ATUALIZACAO = path.join(BASE, 'atualizacao');
+const ARG_ATUALIZACAO = '--atualizacao';
+const veioDeAtualizacao = process.argv.includes(ARG_ATUALIZACAO);
+let versaoEncontrada = null;
+let instalandoVersao = false;
 const CHAVE_DESINSTALAR = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PainelDeScripts';
 const ehExe = () => Boolean(process.pkg) && process.platform === 'win32';
 const mesmoArquivo = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
@@ -1357,6 +1386,7 @@ const aspasPs = t => `'${String(t).replace(/'/g, "''")}'`;
 
 // Atalhos no Menu Iniciar e na Área de Trabalho, com ícone, e o registro em "Aplicativos instalados".
 function registrarApp() {
+    if (process.env.PAINEL_SEM_ATALHOS) return Promise.resolve(true);
     try { fs.writeFileSync(ARQ_ICONE, ICONE_ICO); } catch {}
     const atalho = destino => [
         `$a = $sh.CreateShortcut(${destino})`,
@@ -1403,7 +1433,7 @@ async function pararOutraInstancia() {
 }
 
 function iniciarApp(args = []) {
-    spawn(EXE_APP, args, { detached: true, stdio: 'ignore', cwd: PASTA_APP }).unref();
+    return abrirExe(EXE_APP, args, { cwd: PASTA_APP });
 }
 
 async function desinstalar() {
@@ -1431,6 +1461,8 @@ async function cuidarDaInstalacao() {
     if (process.argv.includes('--desinstalar')) { await desinstalar(); return true; }
     if (mesmoArquivo(process.execPath, EXE_APP)) {
         if (!fs.existsSync(ARQ_ICONE)) registrarApp().catch(() => {});
+        // O exe baixado acabou de se fechar: dá um tempo para o Windows soltar o arquivo.
+        setTimeout(() => fs.promises.rm(PASTA_ATUALIZACAO, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 }).catch(() => {}), 3000);
         return false;
     }
     // Rodando de fora da pasta do app (ex.: Downloads): instala ou atualiza.
@@ -1441,16 +1473,28 @@ async function cuidarDaInstalacao() {
     if (!igual) {
         await pararOutraInstancia();
         fs.mkdirSync(PASTA_APP, { recursive: true });
-        let ok = false;
-        for (let i = 0; i < 10 && !ok; i++) {
-            try { fs.writeFileSync(EXE_APP + '.novo', atual); fs.renameSync(EXE_APP + '.novo', EXE_APP); ok = true; }
-            catch { await sleep(500); }
+        // Grava uma vez só: regravar a cada tentativa faz o antivírus examinar o arquivo de novo.
+        let ok = false, erro = null;
+        try { fs.writeFileSync(EXE_APP + '.novo', atual); } catch (e) { erro = e; }
+        for (let i = 0; i < 120 && !ok && !(erro && i === 0); i++) {
+            try { fs.renameSync(EXE_APP + '.novo', EXE_APP); ok = true; }
+            catch (e) { erro = e; await sleep(1000); }
         }
-        if (!ok) { await sairComPausa('Não consegui instalar o Painel (o arquivo antigo está em uso). Feche o Painel e tente de novo.'); return true; }
+        if (!ok) {
+            log('Falha ao trocar o exe:', erro?.code || '', erro?.message || '');
+            if (!novo) await iniciarApp().catch(e => log('Falha ao reabrir o Painel:', e.message));
+            await sairComPausa('Não consegui instalar o Painel (o arquivo antigo está em uso). Feche o Painel e tente de novo.');
+            return true;
+        }
         log(novo ? `Instalado em ${PASTA_APP}.` : `Atualizado para a versão ${VERSAO}.`);
     }
     await registrarApp();
-    iniciarApp();
+    try {
+        await iniciarApp(veioDeAtualizacao ? [ARG_ATUALIZACAO] : []);
+    } catch (e) {
+        await sairComPausa(`Não consegui abrir o Painel (${e.code || e.message}). Abra pelo atalho na Área de Trabalho.`);
+        return true;
+    }
     if (novo) {
         await caixaMensagem('O Painel de Scripts foi instalado.\n\nPara abrir das próximas vezes, use o atalho "Painel de Scripts" na Área de Trabalho ou no Menu Iniciar. Pode apagar o arquivo baixado.');
     }
@@ -1496,9 +1540,12 @@ async function cuidarDaInstalacao() {
 
     log(`Hub em ${HUB_URL}`);
 
-    // Abre o hub. Com a cópia dos perfis pronta, abre no Edge do Painel (perfil Gilmario);
+    // Abre o hub. Com a cópia dos perfis pronta, abre no Edge do Painel;
     // senão, abre no Edge normal para o primeiro passo (copiar os perfis).
-    if (copiaPronta()) {
+    // Depois de uma atualização, a janela do hub continua aberta e reconecta sozinha.
+    if (veioDeAtualizacao) {
+        log(`Atualizado para a versão ${VERSAO}.`);
+    } else if (copiaPronta()) {
         const r = await abrirNoEdge(HUB_URL, perfilDoHub(), { app: true })
             .catch(e => ({ ok: false, erro: e.message }));
         log(r?.ok ? 'Pronto! Use o hub para abrir a Tallos e a SmartBus.' : `Atenção: ${r?.erro}`);
@@ -1519,10 +1566,13 @@ async function cuidarDaInstalacao() {
 
     // Sem janela preta: quando o hub e o navegador do Painel ficam fechados por um tempo,
     // o Painel se fecha sozinho (abrir o atalho de novo liga tudo outra vez).
-    let ultimoUso = Date.now();
+    const podeFechar = criarVigiaOcioso({
+        limite: 3 * 60 * 1000,
+        salto: 60 * 1000,
+        emUso: () => clientesSSE.size > 0 || Boolean(browser?.connected) || copia.rodando
+    });
     setInterval(() => {
-        if (clientesSSE.size > 0 || browser?.connected || copia.rodando) { ultimoUso = Date.now(); return; }
-        if (Date.now() - ultimoUso > 3 * 60 * 1000) {
+        if (podeFechar()) {
             log('Hub e navegador fechados há 3 minutos. Fechando o Painel.');
             if (timerSalvar) salvarAgora();
             process.exit(0);
@@ -1530,5 +1580,10 @@ async function cuidarDaInstalacao() {
     }, 15000);
 })().catch(e => sairComPausa('Erro ao iniciar: ' + (e?.message || e)));
 
+process.on('uncaughtException', e => {
+    log('Erro inesperado, fechando o Painel:', e?.stack || String(e));
+    process.exit(1);
+});
+process.on('unhandledRejection', e => log('Erro não tratado:', e?.stack || String(e)));
 process.on('exit', () => { if (timerSalvar) salvarAgora(); });
 process.on('SIGINT', () => process.exit(0));

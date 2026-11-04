@@ -286,6 +286,7 @@ button.carimbo:hover{background:var(--papel)}
     <button class="btn btn-ghost" id="btn-atualizar-perfis" title="Copia de novo os perfis do seu navegador"><i class="fa-regular fa-copy"></i> Recopiar perfis</button>
     <button class="btn btn-ghost" id="btn-pasta"><i class="fa-regular fa-folder-open"></i> Abrir pasta</button>
     <button class="btn btn-ghost" id="btn-recarregar-scripts" title="Lê os arquivos da pasta de novo e recarrega as abas"><i class="fa-solid fa-arrows-rotate"></i> Aplicar scripts</button>
+    <button class="btn btn-ghost" id="btn-atualizacao"><i class="fa-solid fa-cloud-arrow-down"></i> <span id="txt-atualizacao">Verificar atualizações</span></button>
     <button class="btn btn-ghost" id="btn-registro" title="Abre o registro do Painel no Bloco de Notas"><i class="fa-regular fa-file-lines"></i> Ver registro</button>
     <button class="btn btn-primary" id="btn-sair" title="Fecha o Painel de Scripts. O navegador do Painel continua aberto, mas sem os scripts."><i class="fa-solid fa-power-off"></i> Fechar Painel</button>
   </div>
@@ -488,7 +489,11 @@ button.carimbo:hover{background:var(--papel)}
     if (pedindo) { de_novo = true; return; }
     pedindo = true;
     try {
-      E = await api('/api/estado');
+      const novo = await api('/api/estado');
+      // Voltou de uma atualização: a tela precisa ser a da versão nova.
+      if (E && novo.versao !== E.versao) return location.reload();
+      E = novo;
+      $('#btn-atualizacao').title = 'Versão atual: ' + E.versao;
       $('#offline').hidden = true;
       render();
     } catch {
@@ -532,6 +537,24 @@ button.carimbo:hover{background:var(--papel)}
     }));
 
   $('#btn-pasta').addEventListener('click', () => acao(() => api('/api/pasta', {})));
+  $('#btn-atualizacao').addEventListener('click', async () => {
+    const btn = $('#btn-atualizacao'), txt = $('#txt-atualizacao');
+    const voltar = () => { btn.disabled = false; txt.textContent = 'Verificar atualizações'; };
+    btn.disabled = true;
+    txt.textContent = 'Procurando…';
+    try {
+      const r = await api('/api/atualizacao/verificar', {});
+      if (!r.nova) { avisar('Você já está na versão ' + r.atual + '.'); return voltar(); }
+      txt.textContent = 'Baixando ' + r.nova + '…';
+      await api('/api/atualizacao/instalar', {});
+      txt.textContent = 'Reiniciando…';
+      // Se a versão nova não subir, o reload nunca acontece: devolve o botão.
+      setTimeout(() => { voltar(); avisar('A atualização não concluiu. Veja o registro.', 'erro'); }, 180000);
+    } catch (e) {
+      avisar(e.message, 'erro');
+      voltar();
+    }
+  });
   $('#btn-registro').addEventListener('click', () => acao(() => api('/api/registro', {})));
   $('#btn-sair').addEventListener('click', async () => {
     if (!confirm('Fechar o Painel de Scripts? Os scripts param de funcionar nas abas até você abrir o Painel de novo.')) return;
