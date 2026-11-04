@@ -1,0 +1,125 @@
+// ==UserScript==
+// @name         Zerar datas
+// @version      1.5.0
+// @description  Zerar Datas (Pesquisa de bilhetes)
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 6 — Zerar Datas (Pesquisa de bilhetes)
+// =========================================================================
+function criarModuloZerarDatas() {
+    let observer = null;
+    let delayId = null;
+    let handleLoad = null;
+
+    function paginaCorreta() {
+        const titulo = document.querySelector('h3.page-title');
+        return titulo &&
+               titulo.innerText.trim() === 'Pesquisa de bilhetes';
+    }
+
+    function alterarCampos() {
+        // executa somente na página desejada
+        if (!paginaCorreta()) return;
+
+        // =====================================================
+        // ZERAR CAMPOS DE DATA
+        // =====================================================
+        const camposData = document.querySelectorAll(`
+            input.hasDatepicker,
+            input[id^="dp"],
+            input[placeholder*="dd"],
+            input[placeholder*="DD"]
+        `);
+        camposData.forEach(campo => {
+            if (campo.type === 'hidden') return;
+            if (campo.value !== '00/00/0000') {
+                campo.value = '00/00/0000';
+                campo.dispatchEvent(new Event('focus', { bubbles: true }));
+                campo.dispatchEvent(new Event('input', { bubbles: true }));
+                campo.dispatchEvent(new Event('change', { bubbles: true }));
+                campo.dispatchEvent(new Event('blur', { bubbles: true }));
+                console.log('[Zerar Datas] Data zerada');
+            }
+        });
+
+        // =====================================================
+        // ALTERAR SELECT2 PARA TODOS
+        // =====================================================
+        const selects = document.querySelectorAll('select');
+        selects.forEach(select => {
+            const optionTodos = [...select.options].find(opt =>
+                opt.text.trim().toUpperCase() === 'TODOS'
+            );
+            if (optionTodos) {
+                select.value = optionTodos.value;
+                select.dispatchEvent(new Event('change', {
+                    bubbles: true
+                }));
+                select.dispatchEvent(new Event('input', {
+                    bubbles: true
+                }));
+                // Atualiza visualmente Select2
+                if (
+                    window.jQuery &&
+                    jQuery(select).hasClass('select2-hidden-accessible')
+                ) {
+                    jQuery(select).trigger('change.select2');
+                }
+                console.log('[Zerar Datas] Select alterado para TODOS');
+            }
+        });
+    }
+
+    return {
+        id: 'zerar_datas',
+        name: 'SMART BUS - Zerar datas',
+        defaultOn: true,
+        fixo: true, // módulo embutido no código-fonte, não pode ser excluído pelo painel
+
+        init() {
+            handleLoad = () => {
+                setTimeout(alterarCampos, 1500);
+            };
+
+            if (document.readyState === 'complete') {
+                handleLoad();
+            } else {
+                window.addEventListener('load', handleLoad);
+            }
+
+            observer = new MutationObserver(() => {
+                if (!paginaCorreta()) return;
+                clearTimeout(delayId);
+                delayId = setTimeout(() => {
+                    alterarCampos();
+                }, 300);
+            });
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+        },
+
+        destroy() {
+            if (observer) {
+                observer.disconnect();
+                observer = null;
+            }
+            if (delayId) {
+                clearTimeout(delayId);
+                delayId = null;
+            }
+            if (handleLoad) {
+                window.removeEventListener('load', handleLoad);
+                handleLoad = null;
+            }
+        }
+    };
+}
+
+registrarModulo(criarModuloZerarDatas());

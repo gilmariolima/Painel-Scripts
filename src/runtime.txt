@@ -1,0 +1,377 @@
+// Runtime do Painel de Scripts: instalado uma vez por aba e usado por todos os scripts.
+// Troca as funções do Tampermonkey (GM_*) por chamadas ao programa Painel de Scripts.
+(() => {
+    'use strict';
+    if (window.__painelRT || window.top !== window) return;
+
+    const testa = r => { try { return new RegExp(r).test(location.href); } catch { return false; } };
+
+    // Uma consulta só ao Painel para todos os scripts da aba (ligado/desligado + dados guardados).
+    let snapshot = null;
+    const pegarSnapshot = ponte => snapshot || (snapshot = ponte({ tipo: 'snapshotTudo' }));
+
+    const quandoPronto = () => new Promise(resolve => {
+        if (document.readyState !== 'loading') return resolve();
+        document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+    });
+
+    // Os módulos são controlados pelo hub: esconde a engrenagem do Painel antigo nas páginas.
+    let engrenagemEscondida = false;
+    function esconderEngrenagem() {
+        if (engrenagemEscondida) return;
+        engrenagemEscondida = true;
+        const estilo = document.createElement('style');
+        estilo.textContent = '#tmm-fab,#tmm-overlay{display:none!important}';
+        (document.head || document.documentElement).appendChild(estilo);
+    }
+
+    window.__painelRT = {
+        rodar(C, rodarScript) {
+            const SCRIPT = C.id;
+            const ARMAZEM = C.armazem;
+            const TOKEN = SCRIPT + ':' + Math.random().toString(36).slice(2);
+            const REGRAS = C.regras;
+            const NOME = C.nome;
+            const VERSAO = C.versao;
+
+            if (!REGRAS.inclui.some(testa) || REGRAS.exclui.some(testa)) return;
+
+            const FLAG = '__painelHub_' + SCRIPT;
+            if (window[FLAG]) return;
+            window[FLAG] = true;
+
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+
+            async function esperarPonte() {
+                for (let i = 0; i < 400; i++) {
+                    if (typeof window.__gmPonte === 'function') return;
+                    await sleep(50);
+                }
+                throw new Error('PONTE_COM_O_PAINEL_INDISPONIVEL');
+            }
+
+            async function ponte(msg) {
+                await esperarPonte();
+                const resposta = await window.__gmPonte(JSON.stringify({ ...msg, script: SCRIPT }));
+                return resposta == null ? null : JSON.parse(resposta);
+            }
+
+            // ---------- Valores guardados (compartilhados entre abas e perfis) ----------
+            let cache = {};
+            const ouvintes = new Map();
+            let proximoOuvinte = 1;
+
+            function avisar(chave, antigo, novo, remoto) {
+                for (const o of ouvintes.values()) {
+                    if (o.chave !== chave) continue;
+                    try { o.cb(chave, antigo, novo, remoto); } catch (e) { console.error('[Painel de Scripts]', e); }
+                }
+            }
+
+            // Recebe mudanças feitas em outras abas ou por outros scripts do mesmo armazém.
+            window.__gmOuvintes = window.__gmOuvintes || {};
+            (window.__gmOuvintes[ARMAZEM] = window.__gmOuvintes[ARMAZEM] || []).push((chave, valor, token) => {
+                if (token === TOKEN) return;
+                const antigo = cache[chave];
+                if (valor === null) delete cache[chave]; else cache[chave] = valor;
+                avisar(chave, clone(antigo), clone(cache[chave]), true);
+            });
+
+            function GM_getValue(chave, padrao) {
+                return cache[chave] === undefined ? padrao : clone(cache[chave]);
+            }
+
+            function GM_setValue(chave, valor) {
+                const antigo = cache[chave];
+                cache[chave] = clone(valor);
+                ponte({ tipo: 'set', key: chave, value: valor === undefined ? null : valor, token: TOKEN })
+                    .catch(e => console.error('[Painel de Scripts] GM_setValue:', e));
+                avisar(chave, clone(antigo), clone(valor), false);
+            }
+
+            function GM_addValueChangeListener(chave, cb) {
+                const id = proximoOuvinte++;
+                ouvintes.set(id, { chave, cb });
+                return id;
+            }
+
+            function GM_removeValueChangeListener(id) {
+                ouvintes.delete(id);
+            }
+
+            function GM_setClipboard(texto) {
+                const valor = String(texto ?? '');
+                const reserva = () => {
+                    const area = document.createElement('textarea');
+                    area.value = valor;
+                    area.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+                    document.body.appendChild(area);
+                    area.select();
+                    try { document.execCommand('copy'); } catch {}
+                    area.remove();
+                };
+                try { navigator.clipboard.writeText(valor).catch(reserva); } catch { reserva(); }
+            }
+
+            function GM_deleteValue(chave) {
+                const antigo = cache[chave];
+                delete cache[chave];
+                ponte({ tipo: 'del', key: chave, token: TOKEN }).catch(() => {});
+                avisar(chave, clone(antigo), undefined, false);
+            }
+
+            function GM_listValues() {
+                return Object.keys(cache);
+            }
+
+            function GM_addStyle(css) {
+                const el = document.createElement('style');
+                el.textContent = String(css);
+                (document.head || document.documentElement).appendChild(el);
+                return el;
+            }
+
+            function GM_openInTab(url) {
+                const w = window.open(url, '_blank');
+                return { close() { try { w && w.close(); } catch {} }, closed: false };
+            }
+
+            function GM_notification(det, titulo) {
+                const texto = typeof det === 'object' ? (det.text || '') : String(det ?? '');
+                const t = typeof det === 'object' ? (det.title || NOME) : (titulo || NOME);
+                try {
+                    if (Notification.permission === 'granted') return void new Notification(t, { body: texto });
+                    Notification.requestPermission().then(p => { if (p === 'granted') new Notification(t, { body: texto }); });
+                } catch { console.info(`[${t}] ${texto}`); }
+            }
+
+            function GM_log(...a) { console.log(`[${NOME}]`, ...a); }
+
+            // GM_xmlhttpRequest: a requisição sai pelo Painel (sem bloqueio de CORS).
+            function GM_xmlhttpRequest(d) {
+                let abortado = false;
+                ponte({
+                    tipo: 'xhr', method: d.method || 'GET', url: d.url, headers: d.headers || {},
+                    data: typeof d.data === 'string' || d.data == null ? d.data : JSON.stringify(d.data),
+                    timeout: d.timeout || 0
+                }).then(r => {
+                    if (abortado) return;
+                    if (r?.erro === 'timeout') return d.ontimeout?.({});
+                    if (r?.erro) return d.onerror?.({ error: r.erro, status: 0 });
+                    let response = r.responseText;
+                    if (d.responseType === 'json') { try { response = JSON.parse(r.responseText); } catch { response = null; } }
+                    const resp = {
+                        status: r.status, statusText: r.statusText, responseText: r.responseText, response,
+                        responseHeaders: r.responseHeaders || '', finalUrl: r.finalUrl, readyState: 4
+                    };
+                    Z.em(SCRIPT, () => { d.onload?.(resp); d.onloadend?.(resp); }, window, []);
+                }).catch(e => d.onerror?.({ error: String(e?.message || e), status: 0 }));
+                return { abort() { abortado = true; d.onabort?.({}); } };
+            }
+
+            const GM_info = {
+                script: { name: NOME, version: VERSAO },
+                scriptHandler: 'Painel de Scripts',
+                version: '1'
+            };
+
+            // Versão "GM." com promessas (scripts mais novos usam esse formato)
+            const GM = {
+                info: GM_info,
+                getValue: async (k, p) => GM_getValue(k, p),
+                setValue: async (k, v) => GM_setValue(k, v),
+                deleteValue: async k => GM_deleteValue(k),
+                listValues: async () => GM_listValues(),
+                setClipboard: async t => GM_setClipboard(t),
+                addStyle: async c => GM_addStyle(c),
+                openInTab: async u => GM_openInTab(u),
+                notification: async (d, t) => GM_notification(d, t),
+                xmlHttpRequest: d => new Promise((ok, falha) => GM_xmlhttpRequest({
+                    ...d,
+                    onload: r => { d.onload?.(r); ok(r); },
+                    onerror: e => { d.onerror?.(e); falha(e); },
+                    ontimeout: e => { d.ontimeout?.(e); falha(e); }
+                }))
+            };
+
+            if (!window.__painelHubClose) {
+                window.__painelHubClose = true;
+                window.close = () => { ponte({ tipo: 'fechar' }).catch(() => {}); };
+            }
+
+            // ---------- Adaptação automática: scripts comuns viram "módulos" ----------
+            // Enquanto o código de um script roda (e dentro dos timers, eventos e observadores que ele
+            // cria), o Painel anota o que ele faz na página. Para desligar o script, desfaz isso:
+            // para timers, tira eventos, desliga observadores, devolve elementos que ele moveu e
+            // remove os elementos que ele criou.
+            if (!window.__painelZonas) {
+                const Z = window.__painelZonas = { atual: null, reg: {}, embrulhos: new WeakMap() };
+                Z.registro = id => (Z.reg[id] = Z.reg[id] || { eventos: [], novos: [], movidos: [] });
+                Z.em = (id, fn, este, args) => {
+                    const antes = Z.atual;
+                    Z.atual = id;
+                    try { return fn.apply(este, args); } finally { Z.atual = antes; }
+                };
+                const anotarInsercao = (pai, no) => {
+                    if (!Z.atual || !no || !(no instanceof Node) || no.nodeType === 11) return;
+                    const r = Z.registro(Z.atual);
+                    if (no.isConnected && no.parentNode) r.movidos.push({ no, pai: no.parentNode, depois: no.nextSibling });
+                    else r.novos.push(no);
+                };
+                const NP = Node.prototype, EP = Element.prototype;
+                const embrulharInsercao = (proto, nome, pegarNos) => {
+                    const orig = proto[nome];
+                    if (typeof orig !== 'function') return;
+                    proto[nome] = function (...a) {
+                        if (Z.atual) for (const no of pegarNos(a)) anotarInsercao(this, no);
+                        return orig.apply(this, a);
+                    };
+                };
+                embrulharInsercao(NP, 'appendChild', a => [a[0]]);
+                embrulharInsercao(NP, 'insertBefore', a => [a[0]]);
+                embrulharInsercao(NP, 'replaceChild', a => [a[0]]);
+                for (const nome of ['append', 'prepend', 'before', 'after', 'replaceWith'])
+                    embrulharInsercao(EP, nome, a => a.filter(x => x instanceof Node));
+                embrulharInsercao(EP, 'insertAdjacentElement', a => [a[1]]);
+                const ET = EventTarget.prototype;
+                const addOrig = ET.addEventListener, remOrig = ET.removeEventListener;
+                const capturaDe = o => typeof o === 'boolean' ? o : Boolean(o && o.capture);
+                ET.addEventListener = function (tipo, fn, opcoes) {
+                    const id = Z.atual;
+                    if (!id || !fn) return addOrig.call(this, tipo, fn, opcoes);
+                    const original = fn;
+                    const embrulho = function (...a) {
+                        return Z.em(id, typeof original === 'function' ? original : original.handleEvent, typeof original === 'function' ? this : original, a);
+                    };
+                    let porFn = Z.embrulhos.get(original);
+                    if (!porFn) Z.embrulhos.set(original, porFn = []);
+                    porFn.push({ alvo: this, tipo, captura: capturaDe(opcoes), embrulho });
+                    Z.registro(id).eventos.push({ alvo: this, tipo, embrulho, opcoes });
+                    return addOrig.call(this, tipo, embrulho, opcoes);
+                };
+                ET.removeEventListener = function (tipo, fn, opcoes) {
+                    const lista = fn && Z.embrulhos.get(fn);
+                    if (lista) {
+                        const i = lista.findIndex(x => x.alvo === this && x.tipo === tipo && x.captura === capturaDe(opcoes));
+                        if (i >= 0) { const [x] = lista.splice(i, 1); return remOrig.call(this, tipo, x.embrulho, opcoes); }
+                    }
+                    return remOrig.call(this, tipo, fn, opcoes);
+                };
+                Z.desfazer = id => {
+                    const r = Z.reg[id];
+                    if (!r) return;
+                    for (const e of r.eventos) { try { remOrig.call(e.alvo, e.tipo, e.embrulho, e.opcoes); } catch {} }
+                    // devolve o que foi movido (do último para o primeiro) e depois tira o que foi criado
+                    for (const m of r.movidos.slice().reverse()) {
+                        try { if (m.pai.isConnected) m.pai.insertBefore(m.no, m.depois && m.depois.parentNode === m.pai ? m.depois : null); } catch {}
+                    }
+                    for (const no of r.novos.slice().reverse()) { try { no.remove ? no.remove() : no.parentNode?.removeChild(no); } catch {} }
+                    delete Z.reg[id];
+                };
+            }
+            const Z = window.__painelZonas;
+            const naZona = fn => (typeof fn === 'function' ? function (...a) { return Z.em(SCRIPT, fn, this, a); } : fn);
+
+            // Versões dos timers/observadores que ficam anotadas para o desligar
+            const timers = { intervalos: new Set(), esperas: new Set(), quadros: new Set(), observadores: new Set() };
+            const meuSetTimeout = (fn, ms, ...a) => {
+                const id = window.setTimeout((...b) => { timers.esperas.delete(id); Z.em(SCRIPT, typeof fn === 'function' ? fn : () => {}, window, b); }, ms, ...a);
+                timers.esperas.add(id);
+                return id;
+            };
+            const meuSetInterval = (fn, ms, ...a) => {
+                const id = window.setInterval(naZona(fn), ms, ...a);
+                timers.intervalos.add(id);
+                return id;
+            };
+            const meuClearTimeout = id => { timers.esperas.delete(id); window.clearTimeout(id); };
+            const meuClearInterval = id => { timers.intervalos.delete(id); window.clearInterval(id); };
+            const meuRAF = fn => {
+                const id = window.requestAnimationFrame(t => { timers.quadros.delete(id); Z.em(SCRIPT, fn, window, [t]); });
+                timers.quadros.add(id);
+                return id;
+            };
+            const embrulharObservador = Base => Base && class extends Base {
+                constructor(cb, ...a) { super(naZona(cb), ...a); timers.observadores.add(this); }
+            };
+            const MeuMutationObserver = embrulharObservador(window.MutationObserver);
+            const MeuResizeObserver = embrulharObservador(window.ResizeObserver);
+            const MeuIntersectionObserver = embrulharObservador(window.IntersectionObserver);
+            const ouvintesDoScript = new Set();
+            const ouvirValorRastreado = (chave, cb) => {
+                const id = GM_addValueChangeListener(chave, naZona(cb));
+                ouvintesDoScript.add(id);
+                return id;
+            };
+
+            function desfazerScript() {
+                timers.intervalos.forEach(id => window.clearInterval(id));
+                timers.esperas.forEach(id => window.clearTimeout(id));
+                timers.quadros.forEach(id => window.cancelAnimationFrame(id));
+                timers.observadores.forEach(o => { try { o.disconnect(); } catch {} });
+                Object.values(timers).forEach(c => c.clear());
+                ouvintesDoScript.forEach(id => GM_removeValueChangeListener(id));
+                ouvintesDoScript.clear();
+                Z.desfazer(SCRIPT);
+            }
+
+            // ---------- Módulos: o script registra init()/destroy() e o hub liga/desliga na hora ----------
+            const modulos = [];
+            function registrarModulo(mod) {
+                if (!mod || typeof mod.init !== 'function') return;
+                mod._ativo = false;
+                modulos.push(mod);
+            }
+            function ligarModulos(ativo) {
+                for (const mod of modulos) {
+                    try {
+                        if (ativo && !mod._ativo) { mod.init(); mod._ativo = true; }
+                        else if (!ativo && mod._ativo) { mod.destroy?.(); mod._ativo = false; }
+                    } catch (e) {
+                        console.error(`[Painel de Scripts] Erro ao ${ativo ? 'ligar' : 'desligar'} "${NOME}":`, e);
+                    }
+                }
+            }
+
+
+            // ---------- Começa: dados compartilhados da aba (uma consulta só para todos os scripts) ----------
+            pegarSnapshot(ponte)
+                .then(async tudo => {
+                    if (!tudo) return;
+                    const ativo = Boolean(tudo.ativos && tudo.ativos[SCRIPT]);
+                    cache = Object.assign(clone((tudo.dados || {})[ARMAZEM] || {}), cache);
+                    if (C.runAt !== 'document-start') await quandoPronto();
+                    let rodou = false;
+                    const rodar = () => {
+                        if (rodou) return;
+                        rodou = true;
+                        try {
+                            Z.em(SCRIPT, rodarScript, window, [window, GM_setValue, GM_getValue,
+                                ouvirValorRastreado, GM_removeValueChangeListener, GM_setClipboard,
+                                GM_deleteValue, GM_listValues, GM_addStyle, GM_openInTab, GM_notification,
+                                GM_log, GM_xmlhttpRequest, GM_info, GM, registrarModulo, modulos,
+                                meuSetTimeout, meuSetInterval, meuClearTimeout, meuClearInterval, meuRAF,
+                                MeuMutationObserver, MeuResizeObserver, MeuIntersectionObserver]);
+                        } catch (e) {
+                            console.error(`[Painel de Scripts] Erro no script "${NOME}":`, e);
+                        }
+                    };
+                    // Scripts com registrarModulo() são carregados sempre (desligados ficam parados) para
+                    // poderem ser ligados na hora pelo hub. Scripts comuns só rodam quando estão ligados.
+                    if (C.temModulo || ativo) rodar();
+                    if (modulos.length) ligarModulos(ativo);
+                    window.__painelAlternar = window.__painelAlternar || {};
+                    window.__painelAlternar[SCRIPT] = liga => {
+                        if (modulos.length) { ligarModulos(liga); return true; }
+                        // Script comum: adaptado na hora. Ligar roda o código de novo; desligar desfaz o que ele fez.
+                        if (liga && !rodou) rodar();
+                        else if (!liga && rodou) { desfazerScript(); rodou = false; }
+                        return true;
+                    };
+                    esconderEngrenagem();
+                })
+                .catch(e => console.error('[Painel de Scripts] Falha ao iniciar: ' + (e?.stack || e)));
+        }
+    };
+})();

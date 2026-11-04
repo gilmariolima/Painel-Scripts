@@ -1,0 +1,108 @@
+// ==UserScript==
+// @name         Botão Aplicar Desconto Dinâmico
+// @version      1.5.0
+// @description  Botão Aplicar Desconto Dinâmico
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 1 — Botão Aplicar Desconto Dinâmico
+// =========================================================================
+function criarModuloDesconto() {
+    const BOTAO_ID = 'btn-aplicar-desconto-custom';
+    const TITULO_MODAL = 'Incluir códigos promocionais';
+    const CODIGO = 'idaevolta10';
+
+    let observer = null;
+
+    function preencherCodigos() {
+        let total = 0;
+
+        document.querySelectorAll('label').forEach(label => {
+            if (!label.textContent.toLowerCase().includes('código promocional')) return;
+
+            // Procura o input dentro do mesmo bloco do label
+            let bloco = label.parentElement;
+            while (bloco && !bloco.querySelector('input')) {
+                bloco = bloco.parentElement;
+            }
+            if (!bloco) return;
+
+            const input = bloco.querySelector('input');
+            if (!input) return;
+
+            try {
+                const setter = Object.getOwnPropertyDescriptor(
+                    HTMLInputElement.prototype,
+                    'value'
+                ).set;
+                setter.call(input, CODIGO);
+            } catch {
+                input.value = CODIGO;
+            }
+
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            total++;
+        });
+
+        console.log(`[Desconto] Preenchidos ${total} códigos promocionais.`);
+    }
+
+    function criarBotaoDesconto(container) {
+        if (document.getElementById(BOTAO_ID)) return;
+
+        const btn = document.createElement('button');
+        btn.id = BOTAO_ID;
+        btn.textContent = 'Aplicar Desconto';
+        btn.style.marginTop = '10px';
+        btn.style.padding = '8px 18px';
+        btn.style.background = '#28a745';
+        btn.style.color = '#fff';
+        btn.style.border = 'none';
+        btn.style.borderRadius = '5px';
+        btn.style.cursor = 'pointer';
+        btn.style.fontWeight = 'bold';
+        btn.style.fontSize = '14px';
+        btn.addEventListener('click', preencherCodigos);
+        container.appendChild(btn);
+    }
+
+    function verificarEAtualizar() {
+        const titulo = [...document.querySelectorAll('.h3-lightbox-title')]
+            .find(el => el.textContent.trim().includes(TITULO_MODAL));
+
+        if (titulo) {
+            criarBotaoDesconto(titulo.parentElement);
+        } else {
+            document.getElementById(BOTAO_ID)?.remove();
+        }
+    }
+
+    return {
+        id: 'desconto',
+        name: 'SMART BUS - Botão Aplicar Desconto Dinâmico',
+        defaultOn: true,
+        fixo: true, // módulo embutido no código-fonte, não pode ser excluído pelo painel
+
+        init() {
+            observer = new MutationObserver(verificarEAtualizar);
+            observer.observe(document.body, { childList: true, subtree: true });
+            verificarEAtualizar();
+        },
+
+        destroy() {
+            if (observer) {
+                observer.disconnect();
+                observer = null;
+            }
+            document.getElementById(BOTAO_ID)?.remove();
+        }
+    };
+}
+
+registrarModulo(criarModuloDesconto());

@@ -1,0 +1,120 @@
+// ==UserScript==
+// @name         Fast Loading
+// @namespace    smartbus.fastloading
+// @version      3.1.0
+// @description  Esconde a rodinha e a camada cinza de carregamento do SmartBus
+// @match        *://*.smarttravelit.com/*
+// @run-at       document-start
+// @grant        none
+// @noframes
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Módulo do Painel de Scripts: liga e desliga na hora pelo hub, sem recarregar.
+// Ao desligar, devolve o visual original de tudo o que foi escondido.
+(function () {
+    'use strict';
+
+    const SPINNER = 'i.fas.fa-spin.fa-circle-notch';
+    const PROPS = ['display', 'visibility', 'opacity', 'pointer-events'];
+
+    let observer = null;
+    let aoClicar = null;
+    const esperas = new Set();
+    const mexidos = new Map(); // elemento -> estilos originais
+
+    function guardar(el) {
+        if (mexidos.has(el)) return;
+        const orig = {};
+        for (const p of PROPS) {
+            orig[p] = [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)];
+        }
+        mexidos.set(el, orig);
+    }
+
+    function esconder(el, props) {
+        guardar(el);
+        for (const [p, v] of props) el.style.setProperty(p, v, 'important');
+    }
+
+    function encontrarOverlay(spinner) {
+        let el = spinner.parentElement;
+        let nivel = 0;
+        while (el && el !== document.body && nivel < 10) {
+            const r = el.getBoundingClientRect();
+            const pos = getComputedStyle(el).position;
+            const cobreTela = r.width >= innerWidth * 0.65 && r.height >= innerHeight * 0.45;
+            if (cobreTela && (pos === 'fixed' || pos === 'absolute')) {
+                esconder(el, [['opacity', '0'], ['visibility', 'hidden'], ['pointer-events', 'none']]);
+                break;
+            }
+            el = el.parentElement;
+            nivel++;
+        }
+    }
+
+    function esconderSpinner() {
+        for (const s of document.querySelectorAll(SPINNER)) {
+            esconder(s, [['display', 'none'], ['visibility', 'hidden'], ['opacity', '0'], ['pointer-events', 'none']]);
+            encontrarOverlay(s);
+        }
+        // Esquece elementos que já saíram da página.
+        for (const el of mexidos.keys()) if (!el.isConnected) mexidos.delete(el);
+    }
+
+    function agendar(...tempos) {
+        requestAnimationFrame(esconderSpinner);
+        for (const ms of tempos) {
+            const id = setTimeout(() => { esperas.delete(id); esconderSpinner(); }, ms);
+            esperas.add(id);
+        }
+    }
+
+    function iniciarObserver() {
+        if (!observer) return;
+        if (!document.documentElement) { requestAnimationFrame(iniciarObserver); return; }
+        observer.observe(document.documentElement, {
+            childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style']
+        });
+        esconderSpinner();
+    }
+
+    function init() {
+        if (location.hostname !== 'prod-guanabara-frontoffice-smartbus.smarttravelit.com') return;
+        observer = new MutationObserver(muts => {
+            for (const m of muts) {
+                if ((m.type === 'childList' && m.addedNodes.length) ||
+                    (m.type === 'attributes' && m.attributeName === 'class')) {
+                    esconderSpinner();
+                    return;
+                }
+            }
+        });
+        iniciarObserver();
+        agendar(0, 10, 25, 50, 100, 200);
+
+        // O spinner costuma aparecer logo depois do clique no horário.
+        aoClicar = () => agendar(0, 5, 15, 30, 50);
+        document.addEventListener('click', aoClicar, true);
+    }
+
+    function destroy() {
+        observer?.disconnect();
+        observer = null;
+        if (aoClicar) document.removeEventListener('click', aoClicar, true);
+        aoClicar = null;
+        for (const id of esperas) clearTimeout(id);
+        esperas.clear();
+        for (const [el, orig] of mexidos) {
+            for (const p of PROPS) {
+                const [v, prio] = orig[p];
+                if (v) el.style.setProperty(p, v, prio); else el.style.removeProperty(p);
+            }
+        }
+        mexidos.clear();
+    }
+
+    const modulo = { init, destroy };
+    if (typeof registrarModulo === 'function') registrarModulo(modulo);
+    else modulo.init(); // fora do app (ex.: Tampermonkey) roda direto
+})();

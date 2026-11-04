@@ -1,0 +1,331 @@
+// ==UserScript==
+// @name         Print da Reserva
+// @version      1.5.0
+// @description  Print da Reserva (itinerário + valores, copia/baixa PNG)
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 16 — Print da Reserva (itinerário + valores, copia/baixa PNG)
+// Cabeçalho do script (recomendado):
+// @require https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @grant   unsafeWindow   (necessário para o carregamento reserva funcionar)
+// =========================================================================
+function criarModuloPrintReserva() {
+    const BTN_ID = 'tmm-print-reserva-btn';
+    const COMP_ID = 'tmm-print-reserva-composicao';
+    const LARGURA = 1150;          // largura total do print (px)
+    const LARG_VALORES = 380;      // largura da coluna de valores (px)
+    const COR_BOTAO = '#8b0000';   // vermelho escuro (mesmo tom do CADASTRAR)
+    const ESCALA = 1.25;           // nitidez: 1 = mais rápido, 2 = mais nítido
+
+    let observer = null;
+    let debounceId = null;
+    let handleKeydown = null;
+
+    // ---------- Busca de elementos ----------
+    function acharElementoPorTexto(texto, raiz = document.body) {
+        const walker = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT);
+        let n;
+        while ((n = walker.nextNode())) {
+            if (n.nodeValue.trim() === texto) return n.parentElement;
+        }
+        return null;
+    }
+
+    // Sobe a partir do texto até o maior bloco que não engole as seções vizinhas
+    function cardDe(textoInicial, marcadoresVizinhos) {
+        let el = acharElementoPorTexto(textoInicial);
+        if (!el) return null;
+        while (el.parentElement && el.parentElement !== document.body) {
+            const txt = el.parentElement.innerText || '';
+            if (marcadoresVizinhos.some(m => txt.includes(m))) break;
+            el = el.parentElement;
+        }
+        return el;
+    }
+
+    // Sobe de "el" até o filho de um bloco que contém algum marcador (dentro do clone)
+    function subirAte(el, limite, marcadores) {
+        while (el.parentElement && el.parentElement !== limite.parentElement) {
+            const txt = el.parentElement.textContent || '';
+            if (marcadores.some(m => txt.includes(m))) return el;
+            el = el.parentElement;
+        }
+        return null;
+    }
+
+    function numeroReserva() {
+        const rotulo = acharElementoPorTexto('Nro da reserva');
+        const m = (rotulo?.parentElement?.innerText || '').match(/\b[A-Z0-9]{5,8}\b/);
+        return m ? m[0] : 'reserva';
+    }
+
+    // Remove a parte "Pagamentos" do card de valores (no clone)
+    function removerPagamentos(card) {
+        const t = acharElementoPorTexto('Pagamentos dessa', card) || acharElementoPorTexto('Pagamentos', card);
+        if (!t) return card;
+        const bloco = subirAte(t, card, ['Valores dessa']);
+        if (!bloco) return card;
+        const pai = bloco.parentElement;
+        let n = bloco;
+        while (n) { const prox = n.nextElementSibling; n.remove(); n = prox; }
+        let ult = pai.lastElementChild;
+        while (ult && !ult.textContent.trim() && ult.tagName !== 'TABLE') {
+            const ant = ult.previousElementSibling; ult.remove(); ult = ant;
+        }
+        return card;
+    }
+
+    // ---------- Monta o layout do print ----------
+    function montarComposicao() {
+        const SERV = 'Serviços dessa', VAL = 'Valores dessa', PASS = 'Passageiros dessa';
+
+        const titulo = cardDe('Visualização da reserva', [SERV, 'Nro da reserva']);
+        const resumo = cardDe('Nro da reserva', [SERV, 'Visualização da reserva']);
+        const itinerario = cardDe(SERV, [VAL, PASS]);
+        const valores = cardDe(VAL, [SERV, PASS]);
+
+        if (!itinerario || !valores) return null;
+
+        const prep = (el) => {
+            const c = el.cloneNode(true);
+            // tira do print qualquer botão (PRINT, Copiar Trecho, Copiar Dados etc.)
+            c.querySelectorAll('button, .tm-copiar-btn, .tm-preencher-area').forEach(b => b.remove());
+            // tira a borda tracejada do módulo "Área de clique e copia"
+            c.querySelectorAll('[data-copiar-ativo]').forEach(el => {
+                el.style.border = '';
+                el.style.padding = '';
+                el.style.borderRadius = '';
+            });
+            Object.assign(c.style, {
+                width: 'auto', maxWidth: 'none', flex: 'none',
+                margin: '0', position: 'static', float: 'none'
+            });
+            return c;
+        };
+
+        const comp = document.createElement('div');
+        comp.id = COMP_ID;
+        Object.assign(comp.style, {
+            position: 'absolute',
+            top: window.scrollY + 'px',
+            left: '0',
+            width: LARGURA + 'px',
+            padding: '16px',
+            boxSizing: 'border-box',
+            background: getComputedStyle(document.body).backgroundColor || '#f3f4f6',
+            opacity: '0',
+            pointerEvents: 'none',
+            zIndex: '-1',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px'
+        });
+
+        // Cabeçalho: só o resumo (sem o título "Reserva / Visualização da reserva")
+        if (resumo) {
+            const r = prep(resumo);
+            if (titulo && resumo.contains(titulo)) {
+                const t = acharElementoPorTexto('Visualização da reserva', r);
+                const tituloClone = t && subirAte(t, r, ['Nro da reserva']);
+                if (tituloClone) tituloClone.remove();
+            }
+            comp.appendChild(r);
+        }
+
+        const linha = document.createElement('div');
+        Object.assign(linha.style, {
+            display: 'grid',
+            gridTemplateColumns: `1fr ${LARG_VALORES}px`,
+            gap: '14px',
+            alignItems: 'start'
+        });
+        linha.appendChild(prep(itinerario));
+        linha.appendChild(removerPagamentos(prep(valores)));
+        comp.appendChild(linha);
+
+        document.body.appendChild(comp);
+        return comp;
+    }
+
+    // ---------- Carregamento do html2canvas ----------
+    const URL_H2C = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+    let h2cPromise = null;
+
+    // 1º tenta o @require; se não tiver, baixa a biblioteca na hora (só uma vez)
+    function obterHtml2canvas() {
+        if (typeof html2canvas === 'function') return Promise.resolve(html2canvas);
+        const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        if (typeof w.html2canvas === 'function') return Promise.resolve(w.html2canvas);
+
+        if (!h2cPromise) {
+            h2cPromise = new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = URL_H2C;
+                s.onload = () => (typeof w.html2canvas === 'function')
+                    ? resolve(w.html2canvas)
+                    : reject(new Error('html2canvas baixou mas não ficou acessível (falta @grant unsafeWindow?)'));
+                s.onerror = () => reject(new Error('Não consegui baixar o html2canvas (site bloqueou ou sem internet)'));
+                document.head.appendChild(s);
+            }).catch(err => { h2cPromise = null; throw err; });
+        }
+        return h2cPromise;
+    }
+
+    // ---------- Captura ----------
+    async function gerarCanvas() {
+        const h2c = await obterHtml2canvas();
+        const comp = montarComposicao();
+        if (!comp) throw new Error('Não encontrei as seções da reserva na tela.');
+        try {
+            return await h2c(comp, {
+                backgroundColor: comp.style.background,
+                scale: ESCALA,
+                useCORS: true,
+                logging: false,
+                imageTimeout: 1500,
+                windowWidth: Math.max(window.innerWidth, LARGURA + 100),
+                // só copia o caminho até a composição (bem mais rápido)
+                ignoreElements: (el) =>
+                    el !== document.body &&
+                    document.body.contains(el) &&
+                    !el.contains(comp) &&
+                    !comp.contains(el),
+                onclone: (doc) => {
+                    const c = doc.getElementById(COMP_ID);
+                    if (c) { c.style.opacity = '1'; c.style.zIndex = '1'; }
+                }
+            });
+        } finally {
+            comp.remove();
+        }
+    }
+
+    const canvasParaBlob = (canvas) => new Promise(res => canvas.toBlob(res, 'image/png'));
+
+    function baixar(blob, nome) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = nome;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }
+
+    function feedback(btn, texto, cor) {
+        btn.textContent = texto;
+        btn.style.background = cor;
+        setTimeout(() => {
+            btn.textContent = btn.dataset.label;
+            btn.style.background = COR_BOTAO;
+        }, 1800);
+    }
+
+    async function tirarPrint(e) {
+        const btn = document.getElementById(BTN_ID);
+        if (!btn) return;
+        const nome = `reserva_${numeroReserva()}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.png`;
+        btn.textContent = 'Capturando...';
+
+        const blobPromise = gerarCanvas().then(canvasParaBlob);
+
+        try {
+            if (e.shiftKey || !navigator.clipboard || typeof ClipboardItem === 'undefined') {
+                baixar(await blobPromise, nome);
+                feedback(btn, '✔ Baixado', '#2e7d32');
+            } else {
+                // ClipboardItem com Promise mantém o "gesto do usuário" válido no Chrome
+                await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobPromise })]);
+                feedback(btn, '✔ Copiado!', '#2e7d32');
+            }
+        } catch (err) {
+            console.error('[Print Reserva]', err);
+            try {
+                baixar(await blobPromise, nome);
+                feedback(btn, '✔ Baixado', '#2e7d32');
+            } catch {
+                feedback(btn, '✖ Erro', '#c62828');
+            }
+        }
+    }
+
+    // ---------- Botão (canto superior direito do card Itinerário) ----------
+    function criarBotao() {
+        const btn = document.createElement('button');
+        btn.id = BTN_ID;
+        btn.type = 'button';
+        btn.dataset.label = 'PRINT';
+        btn.textContent = btn.dataset.label;
+        btn.title = 'Clique: copia o print | Shift+Clique: baixa PNG | Atalho: Alt+P';
+        Object.assign(btn.style, {
+            position: 'absolute', top: '14px', right: '48px', zIndex: 10,
+            padding: '9px 20px', background: COR_BOTAO, color: '#fff',
+            border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '700',
+            cursor: 'pointer', boxShadow: '0 2px 6px rgba(0,0,0,.2)'
+        });
+        btn.addEventListener('click', tirarPrint);
+        return btn;
+    }
+
+    function atualizar() {
+        const naReserva = !!acharElementoPorTexto('Visualização da reserva');
+        let btn = document.getElementById(BTN_ID);
+        if (!naReserva) { btn?.remove(); return; }
+
+        const card = cardDe('Serviços dessa', ['Valores dessa', 'Passageiros dessa']);
+        if (!card) return;
+        if (btn && card.contains(btn)) return;
+
+        if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
+        if (!btn) btn = criarBotao();
+        card.appendChild(btn);
+    }
+
+    return {
+        id: 'print_reserva',
+        name: 'SMART BUS - Print da Reserva',
+        defaultOn: true,
+        fixo: false,
+
+        init() {
+            if (!location.hostname.includes('smarttravelit.com')) return;
+
+            handleKeydown = (e) => {
+                if (e.altKey && e.key.toLowerCase() === 'p' && document.getElementById(BTN_ID)) {
+                    e.preventDefault();
+                    tirarPrint({ shiftKey: e.shiftKey });
+                }
+            };
+            document.addEventListener('keydown', handleKeydown);
+
+            observer = new MutationObserver((muts) => {
+                // ignora mudanças causadas pela composição temporária do print
+                if (muts.every(m => [...m.addedNodes, ...m.removedNodes].every(n => n.id === COMP_ID))) return;
+                clearTimeout(debounceId);
+                debounceId = setTimeout(atualizar, 400);
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+
+            atualizar();
+        },
+
+        destroy() {
+            observer?.disconnect();
+            observer = null;
+
+            clearTimeout(debounceId);
+            debounceId = null;
+
+            if (handleKeydown) document.removeEventListener('keydown', handleKeydown);
+            handleKeydown = null;
+
+            document.getElementById(BTN_ID)?.remove();
+            document.getElementById(COMP_ID)?.remove();
+        }
+    };
+}
+
+registrarModulo(criarModuloPrintReserva());

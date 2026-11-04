@@ -1,0 +1,115 @@
+// ==UserScript==
+// @name         Ocultar botões da barra
+// @version      1.5.0
+// @description  Tallos: Ocultar Botões da Barra do Editor + Itens do Menu
+// @match        *://*.tallos.com.br/*
+// @grupo        Tallos
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 15 — Tallos: Ocultar Botões da Barra do Editor + Itens do Menu
+// =========================================================================
+function criarModuloTallosOcultarBotoesBarra() {
+    const ESTILO_ID = 'tmm-tallos-ocultar-botoes-barra';
+    const ATTR_OCULTO = 'data-tmm-oculto';
+
+    // Botões da barra do editor (Quill). Comente (//) a linha de qualquer
+    // botão que você quiser manter visível.
+    const BOTOES_OCULTAR = [
+        'ql-bold',
+        'ql-italic',
+        'ql-reset',
+        'ql-emoji',
+        'ql-trigger_message',
+        'ql-template_messages',
+        'ql-microphone',
+    ];
+
+    // Itens do menu lateral do Tallos, identificados pelo id (sem o "-label").
+    const ITENS_MENU_OCULTAR = [
+        'primaryItemTickets',
+    ];
+
+    // Elementos que só dá para achar pela posição (índice começa em 0).
+    const POR_INDICE_OCULTAR = [
+        { seletor: '.ButtonBase__Root-sc-3vs9dj-0', indice: 3 },
+    ];
+
+    let styleEl = null;
+    let observer = null;
+    let agendado = false;
+
+    function ocultarPorIndice() {
+        agendado = false;
+        for (const { seletor, indice } of POR_INDICE_OCULTAR) {
+            const el = document.querySelectorAll(seletor)[indice];
+            if (el && !el.hasAttribute(ATTR_OCULTO)) {
+                el.setAttribute(ATTR_OCULTO, '1');
+                el.style.setProperty('display', 'none', 'important');
+            }
+        }
+    }
+
+    function agendar() {
+        if (agendado) return;
+        agendado = true;
+        requestAnimationFrame(ocultarPorIndice);
+    }
+
+    return {
+        id: 'tallos_ocultar_botoes_barra',
+        name: 'TALLOS - Ocultar botões da barra',
+        defaultOn: true,
+        fixo: false,
+
+        init() {
+            if (!location.hostname.includes('tallos.com.br')) return;
+            if (document.getElementById(ESTILO_ID)) return;
+
+            const seletoresBarra = BOTOES_OCULTAR
+                .map(cls => `.ql-toolbar button.${cls}`);
+
+            const seletoresMenu = ITENS_MENU_OCULTAR.flatMap(id => [
+                `#${id}`,
+                `#${id}-label`,
+                `a:has(#${id}-label)`,
+                `button:has(#${id}-label)`,
+                `li:has(> a #${id}-label, > button #${id}-label)`,
+                `[role="button"]:has(#${id}-label)`,
+                `[role="menuitem"]:has(#${id}-label)`,
+            ]);
+
+            const todosSeletores = [...seletoresBarra, ...seletoresMenu].join(',\n');
+
+            styleEl = document.createElement('style');
+            styleEl.id = ESTILO_ID;
+            styleEl.textContent = `
+                ${todosSeletores} {
+                    display: none !important;
+                }
+            `;
+            document.head.appendChild(styleEl);
+
+            ocultarPorIndice();
+            observer = new MutationObserver(agendar);
+            observer.observe(document.body, { childList: true, subtree: true });
+        },
+
+        destroy() {
+            styleEl?.remove();
+            styleEl = null;
+
+            observer?.disconnect();
+            observer = null;
+
+            document.querySelectorAll(`[${ATTR_OCULTO}]`).forEach(el => {
+                el.removeAttribute(ATTR_OCULTO);
+                el.style.removeProperty('display');
+            });
+        }
+    };
+}
+
+registrarModulo(criarModuloTallosOcultarBotoesBarra());

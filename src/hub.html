@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101318">
+<title>Painel de Scripts</title>
+<link rel="icon" type="image/png" href="/icone.png">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link rel="stylesheet" href="/vendor/codemirror.css">
+<script src="/vendor/codemirror.js"></script>
+<style>
+:root{
+  /* paleta: azul, preto, branco e cinza */
+  --papel:#f1f3f6; --talao:#fff; --tinta:#101318; --tinta-2:#4b5260; --tinta-3:#6b7280;
+  --filete:#dde1e7; --filete-forte:#bfc5ce;
+  --vinho:#1d4ed8; --vinho-esc:#1739a8; --vinho-claro:#e8eefc;
+  --amarelo:#1d4ed8; --via:#eef2fb; --via-filete:#b9c8ef; --via-rotulo:#1e3a8a;
+  --pend:#4b5260; --env:#1d4ed8; --rec:#1d4ed8; --recus:#b91c1c; --canc:#6b7280;
+  --cond:"Barlow Condensed","Arial Narrow",sans-serif;
+  --mono:"Courier Prime","Courier New",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--papel);color:var(--tinta);font:16px/1.45 Barlow,system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+button,select,input{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--vinho);outline-offset:2px}
+.barra :focus-visible{outline-color:#fff}
+
+/* barra superior */
+.barra{background:var(--tinta);color:#fff;display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:64px;padding:10px 40px;flex-wrap:wrap}
+.marca{display:flex;align-items:center;gap:16px;font:700 26px/1 var(--cond);letter-spacing:.06em;text-transform:uppercase}
+.selo{background:var(--vinho);color:#fff;font:700 13px/1 var(--cond);letter-spacing:1.5px;text-transform:uppercase;padding:6px 10px}
+.conexao{display:flex;align-items:center;gap:14px;text-align:right}
+.conexao strong{display:block;font-weight:700;font-size:15px}
+.conexao span{display:block;font-size:15px;opacity:.85}
+.btn-barra{width:40px;height:40px;border:1px solid rgba(255,255,255,.75);background:transparent;color:#fff;border-radius:3px;cursor:pointer;display:grid;place-items:center}
+.btn-barra:hover{background:rgba(255,255,255,.12)}
+
+/* abas */
+.abas{display:flex;gap:4px;padding:14px 40px 0;overflow-x:auto;overflow-y:hidden;background:linear-gradient(var(--vinho),var(--vinho)) left bottom/100% 1.5px no-repeat;scrollbar-width:none}
+.navbtn{display:flex;align-items:center;gap:8px;white-space:nowrap;font:600 17px var(--cond);letter-spacing:.07em;text-transform:uppercase;color:var(--tinta-2);background:none;border:1px solid transparent;border-top:3px solid transparent;border-bottom:0;padding:7px 20px 9px;border-radius:3px 3px 0 0;cursor:pointer;position:relative}
+.navbtn:hover{color:var(--vinho)}
+.navbtn.ativo{background:#fff;color:var(--vinho);border-color:var(--vinho);border-top-color:var(--vinho)}
+.navbtn i{font-size:14px}
+.cont{background:var(--vinho-claro);color:var(--vinho-esc);font:700 13px/1 var(--cond);padding:3px 6px;border-radius:2px;letter-spacing:.05em}
+
+main{flex:1;padding:32px 40px 40px;width:100%;max-width:1440px}
+.secao[hidden]{display:none}
+.cab{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+h1{font:700 44px/1 var(--cond);letter-spacing:.03em;text-transform:uppercase;margin:0}
+.sub{color:var(--tinta-2);font-size:15px;margin-top:6px}
+.acoes{display:flex;gap:10px;flex-wrap:wrap}
+
+/* botões */
+.btn{height:44px;padding:0 18px;border-radius:3px;border:1px solid transparent;cursor:pointer;display:inline-flex;align-items:center;gap:9px;font:700 17px var(--cond);letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+.btn-primary{background:var(--vinho);color:#fff}
+.btn-primary:hover{background:var(--vinho-esc)}
+.btn-ghost{background:#fff;color:var(--tinta);border-color:var(--tinta)}
+.btn-ghost:hover{background:var(--papel)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn-ico{width:36px;height:36px;border:1px solid var(--filete-forte);background:#fff;border-radius:3px;cursor:pointer;display:inline-grid;place-items:center;color:var(--tinta)}
+.btn-ico:hover{border-color:var(--tinta)}
+.btn-ico.perigo:hover{color:var(--recus);border-color:var(--recus)}
+
+/* filtros */
+.filtros{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.busca{position:relative;flex:1 1 320px}
+.busca i{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--tinta-3);font-size:14px}
+.input{height:44px;width:100%;border:1.5px solid var(--filete-forte);border-radius:3px;background:#fff;padding:0 14px}
+.busca .input{padding-left:38px}
+.input:focus{outline:none;border-color:var(--vinho);box-shadow:0 0 0 3px rgba(29,78,216,.15)}
+select.input{appearance:none;padding-right:38px;cursor:pointer;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M0 0h12L6 8z' fill='%231d1b18'/%3E%3C/svg%3E") no-repeat right 14px center}
+.filtros select.input{flex:0 1 220px;width:auto}
+.chk{display:inline-flex;align-items:center;gap:10px;min-height:44px;padding:0 14px;border:1.5px solid var(--filete-forte);border-radius:3px;background:#fff;cursor:pointer;font-weight:600;font-size:15px;user-select:none}
+.chk input{width:18px;height:18px;accent-color:var(--vinho);margin:0}
+.chk:has(input:checked){background:var(--vinho-claro);border-color:var(--vinho)}
+
+/* tabela */
+.quadro{background:#fff;border:1px solid var(--filete-forte);overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:640px}
+th{font:600 15px var(--cond);letter-spacing:.09em;text-transform:uppercase;color:var(--tinta-2);background:#f6f7f9;text-align:left;padding:14px 12px 12px;border-bottom:1.5px solid var(--vinho);white-space:nowrap}
+td{padding:14px 12px;border-bottom:1px dashed var(--filete);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+th:first-child,td:first-child{padding-left:18px}
+th:last-child,td:last-child{padding-right:18px}
+tr.grupo td{background:var(--papel);font:700 15px var(--cond);letter-spacing:.1em;text-transform:uppercase;color:var(--vinho);padding:9px 18px;border-bottom:1px solid var(--filete-forte)}
+.nome{font-weight:600}
+.leve{color:var(--tinta-3);font-size:14px}
+.num{font-family:var(--mono);color:var(--vinho);font-weight:700}
+.col-sit{width:180px}
+.col-acao{width:90px;text-align:right}
+a.btn{text-decoration:none}
+.direita{text-align:right}
+.tag{display:inline-block;font:600 14px var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--tinta-2);border:1px solid var(--filete-forte);border-radius:2px;padding:3px 8px 2px}
+
+/* carimbo: o status é o próprio botão, "bate" quando muda */
+.carimbo{display:inline-block;font:700 15px/1 var(--cond);letter-spacing:.14em;text-transform:uppercase;border:2px solid currentColor;border-radius:2px;padding:5px 9px 4px;transform:rotate(-3deg);background:transparent}
+button.carimbo{cursor:pointer}
+button.carimbo:hover{background:var(--papel)}
+.c-rec{color:var(--rec)} .c-canc{color:var(--canc)} .c-recus{color:var(--recus)} .c-pend{color:var(--pend)} .c-env{color:var(--env)}
+.carimbo.desl{border-style:dashed}
+@keyframes bater{0%{transform:rotate(-9deg) scale(1.45);opacity:0}55%{transform:rotate(-2deg) scale(.94);opacity:1}100%{transform:rotate(-3deg) scale(1)}}
+.carimbo.batendo{animation:bater .32s cubic-bezier(.2,.8,.3,1)}
+
+/* cartões */
+.grade{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:20px;align-items:start}
+.card{background:#fff;border:1px solid var(--filete-forte)}
+.painel-tit{display:flex;justify-content:space-between;align-items:center;gap:10px;font:700 18px var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--vinho);padding:13px 18px;border-bottom:1.5px solid var(--vinho)}
+.card-corpo{padding:18px;display:flex;flex-direction:column;gap:16px}
+.campo > label{display:block;font:600 15px var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--tinta-2);margin-bottom:6px}
+.linha{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.via{background:var(--via);border:1px dashed var(--via-filete);color:var(--via-rotulo);padding:12px 14px;font-size:15px}
+.chks{display:flex;flex-direction:column;gap:8px}
+.vazio{padding:36px 18px;text-align:center;color:var(--tinta-2)}
+.vazio strong{display:block;font:700 22px var(--cond);text-transform:uppercase;letter-spacing:.05em;color:var(--tinta);margin-bottom:4px}
+.vazio .acoes{justify-content:center;margin-top:16px}
+
+/* rodapé */
+.rodape{border-top:1px solid var(--filete-forte);padding:14px 40px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;color:var(--tinta-2);font-size:14px}
+.rodape code{font-family:var(--mono);font-size:13px;color:var(--tinta);word-break:break-all}
+
+/* avisos */
+.avisos{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:50;max-width:min(380px,calc(100vw - 40px))}
+.aviso{background:#fff;border:2px solid var(--tinta);box-shadow:0 8px 24px rgba(16,19,24,.18);padding:12px 14px;font-weight:600;font-size:15px;display:flex;gap:10px;align-items:flex-start}
+.aviso-ok{border-color:var(--rec)} .aviso-ok i{color:var(--rec)}
+.aviso-erro{border-color:var(--recus)} .aviso-erro i{color:var(--recus)}
+.aviso i{margin-top:3px}
+
+.offline{background:var(--recus);color:#fff;text-align:center;padding:8px 16px;font-weight:600}
+
+
+/* atalhos de abertura */
+.abrir{margin-bottom:32px}
+.abrir .cab{margin-bottom:14px}
+.atalhos{display:grid;grid-template-columns:1fr;gap:20px;align-items:stretch}
+.atalhos .card-corpo{flex-direction:row;flex-wrap:wrap;gap:10px}
+.perfil{display:flex;align-items:center;min-width:150px;max-width:280px;white-space:nowrap;min-height:64px;padding:12px 18px;background:#fff;border:1.5px solid var(--tinta);border-radius:3px;cursor:pointer;text-align:left;color:var(--tinta)}
+.perfil:hover{background:var(--vinho);border-color:var(--vinho);color:#fff}
+.perfil:hover .perfil-sub{color:rgba(255,255,255,.8)}
+.perfil-nome{font:700 22px/1.1 var(--cond);letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis}
+.perfil-num{font:700 40px/1 var(--cond)}
+.perfil-sub{font:600 14px var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--tinta-2)}
+.perfil.largo{width:100%;min-height:96px}
+.perfil.largo .perfil-num{font-size:30px;text-transform:uppercase;letter-spacing:.04em}
+.perfil:disabled{opacity:.45;cursor:not-allowed;background:#fff;color:var(--tinta);border-style:dashed}
+.perfil:disabled .perfil-sub{color:var(--tinta-2)}
+.perfil.abrindo{background:var(--vinho-claro)}
+.nav-escolha{display:inline-flex;border:1.5px solid var(--tinta);border-radius:3px;overflow:hidden;height:44px}
+.nav-escolha button{border:0;background:#fff;color:var(--tinta);padding:0 18px;font:700 17px var(--cond);letter-spacing:.08em;text-transform:uppercase;cursor:pointer}
+.nav-escolha button+button{border-left:1.5px solid var(--tinta)}
+.nav-escolha button:hover{background:var(--papel)}
+.nav-escolha button[aria-pressed="true"]{background:var(--vinho);color:#fff}
+.nav-escolha button:disabled{opacity:.4;cursor:not-allowed}
+.perfil-caixa{position:relative}
+.btn-mini{height:34px;padding:0 12px;font-size:15px}
+.sem-perfis{color:var(--tinta-2);align-self:center;max-width:46ch}
+.perfil-remover{position:absolute;top:-8px;right:-8px;width:24px;height:24px;border-radius:50%;border:1.5px solid var(--tinta);background:#fff;color:var(--tinta);font:700 14px/1 Barlow,sans-serif;cursor:pointer;display:grid;place-items:center;opacity:0;transition:opacity .12s}
+.perfil-caixa:hover .perfil-remover,.perfil-remover:focus-visible{opacity:1}
+.perfil-remover:hover{background:var(--recus);border-color:var(--recus);color:#fff}
+.perfil.novo{border-style:dashed;color:var(--tinta-2)}
+.perfil.novo .perfil-num{font-weight:600}
+.form-perfil{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;padding:0 18px 18px}
+.form-perfil[hidden]{display:none}
+.form-perfil .campo{flex:1 1 240px}
+.form-perfil .campo > label{display:block;font:600 15px var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--tinta-2);margin-bottom:6px}
+.form-perfil .dica{flex-basis:100%;color:var(--tinta-3);font-size:14px}
+.edge-aviso[hidden]{display:none}
+.edge-aviso{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+@media (max-width:760px){.atalhos{grid-template-columns:1fr}}
+
+/* scripts */
+.secao-scripts{margin-bottom:32px}
+.col-acoes{width:110px;text-align:right;white-space:nowrap}
+.col-acoes .btn-ico+.btn-ico{margin-left:6px}
+.sites{display:flex;flex-wrap:wrap;gap:6px}
+.desc{color:var(--tinta-3);font-size:14px;margin-top:2px}
+.selo-mini{display:inline-block;margin-left:8px;font:600 12px var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--tinta-2);border:1px solid var(--filete-forte);border-radius:2px;padding:1px 6px;vertical-align:2px}
+/* editor */
+.modal{position:fixed;inset:0;background:rgba(16,19,24,.55);display:flex;align-items:stretch;justify-content:center;padding:24px;z-index:60}
+.modal[hidden]{display:none}
+.modal-caixa{background:#fff;border:1px solid var(--tinta);width:min(1200px,100%);display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(16,19,24,.35)}
+.modal-cab{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;border-bottom:1.5px solid var(--vinho)}
+.modal-cab h2{margin:0;font:700 24px/1.1 var(--cond);letter-spacing:.04em;text-transform:uppercase}
+.modal-cab .sub{margin:2px 0 0}
+.modal-corpo{flex:1;min-height:0;display:flex;flex-direction:column}
+.modal-corpo .CodeMirror,.modal-corpo textarea.codigo{flex:1;height:auto;min-height:0;font:14px/1.5 Consolas,"Cascadia Mono","Courier New",monospace;border:0}
+.modal-corpo textarea.codigo{width:100%;padding:12px;resize:none;outline:none}
+.CodeMirror-gutters{background:#f6f7f9;border-right:1px solid var(--filete)}
+.CodeMirror-linenumber{color:var(--tinta-3)}
+.modal-pe{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;border-top:1px solid var(--filete-forte);background:#f6f7f9}
+.modal-pe .info{color:var(--tinta-2);font-size:14px}
+.modal-pe .erro{color:var(--recus);font-weight:600}
+.aviso .btn-mini{margin-left:auto}
+@media (max-width:720px){.modal{padding:0}.col-acoes{width:auto}}
+@media (max-width:900px){.grade{grid-template-columns:1fr}}
+@media (max-width:720px){
+  .barra,.abas,.rodape{padding-left:16px;padding-right:16px}
+  main{padding:20px 16px 32px}
+  h1{font-size:34px}
+  .marca{font-size:21px}
+  .conexao{text-align:left}
+}
+@media (prefers-reduced-motion:reduce){.carimbo.batendo{animation:none}}
+</style>
+</head>
+<body>
+<header class="barra">
+  <div class="marca">Painel de Scripts <span class="selo">SmartBus + Tallos</span></div>
+</header>
+<div class="offline" id="offline" hidden>O Painel de Scripts foi fechado. Abra pelo atalho na Área de Trabalho ou no Menu Iniciar.</div>
+
+
+<main>
+  <section class="abrir" aria-labelledby="t-abrir">
+    <div class="cab">
+      <div>
+        <h1 id="t-abrir">Abrir no <span class="nv">Edge</span></h1>
+        <div class="sub">Cada botão abre o sistema no perfil do <span class="nv">Edge</span> indicado, já com o Painel de Scripts.</div>
+      </div>
+      <div class="acoes">
+      <div class="nav-escolha" role="group" aria-label="Navegador">
+        <button type="button" data-nav="edge">Edge</button><button type="button" data-nav="chrome">Chrome</button>
+      </div>
+      <label class="chk" title="Ao abrir o PainelDeScripts.exe, abre a Tallos e a SmartBus em todos os perfis das listas"><input type="checkbox" id="abrir-ao-iniciar"> Abrir sozinho ao iniciar</label>
+      </div>
+    </div>
+    <div class="via edge-aviso" id="edge-aviso" hidden>
+      <span id="edge-aviso-texto"></span>
+      <button class="btn btn-primary" id="btn-copiar-perfis"><i class="fa-regular fa-copy"></i> Copiar perfis do <span class="nv">Edge</span></button>
+    </div>
+    <div class="atalhos">
+      <div class="card">
+        <div class="painel-tit">Tallos <button class="btn btn-ghost btn-mini" data-escanear="tallos" title="Procura todos os perfis do navegador e coloca nesta lista"><i class="fa-solid fa-magnifying-glass"></i> Escanear perfis</button></div>
+        <div class="card-corpo" id="atalho-tallos"></div>
+      </div>
+      <div class="card">
+        <div class="painel-tit">SmartBus <button class="btn btn-ghost btn-mini" data-escanear="smartbus" title="Procura todos os perfis do navegador e coloca nesta lista"><i class="fa-solid fa-magnifying-glass"></i> Escanear perfis</button></div>
+        <div class="card-corpo" id="atalho-smartbus"></div>
+      </div>
+    </div>
+  </section>
+  <!-- MÓDULOS -->
+  <section class="secao-scripts" aria-labelledby="t-scripts">
+    <div class="cab">
+      <div>
+        <h1 id="t-scripts">Scripts</h1>
+        <div class="sub" id="scr-resumo">&nbsp;</div>
+      </div>
+      <div class="acoes">
+        <button class="btn btn-ghost" id="btn-desligar-todos" title="Desliga todos os scripts que aparecem na lista"><i class="fa-solid fa-power-off"></i> Desligar todos</button>
+        <button class="btn btn-ghost" id="btn-ligar-todos" title="Liga todos os scripts que aparecem na lista"><i class="fa-solid fa-bolt"></i> Ligar todos</button>
+        <label class="btn btn-ghost" title="Escolher um arquivo .js ou .user.js do computador"><i class="fa-regular fa-file-code"></i> Abrir arquivo<input type="file" id="scr-arquivo" accept=".js,.txt" hidden></label>
+        <button class="btn btn-primary" id="btn-novo-script"><i class="fa-solid fa-plus"></i> Adicionar script</button>
+      </div>
+    </div>
+    <div class="filtros">
+      <div class="busca"><i class="fa-solid fa-magnifying-glass"></i><input class="input" id="scr-busca" placeholder="Pesquisar script" autocomplete="off"></div>
+      <select class="input" id="scr-grupo" aria-label="Sistema">
+        <option value="">Todos os sistemas</option>
+        <option value="SmartBus">SmartBus</option>
+        <option value="Tallos">Tallos</option>
+        <option value="Outros">Outros</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="scr-so-desligados"> Só desligados</label>
+    </div>
+    <div class="quadro">
+      <table>
+        <thead><tr><th>Script</th><th>Sites</th><th>Versão</th><th class="col-sit">Situação</th><th class="col-acoes">Ações</th></tr></thead>
+        <tbody id="scr-corpo"></tbody>
+      </table>
+    </div>
+  </section>
+
+
+</main>
+
+<footer class="rodape">
+  <div>Scripts em <code id="pasta">…</code></div>
+  <div class="acoes">
+    <button class="btn btn-ghost" id="btn-restaurar-removidos" hidden title="Traz de volta os módulos do app que você excluiu"><i class="fa-solid fa-rotate-left"></i> Restaurar módulos excluídos</button>
+    <button class="btn btn-ghost" id="btn-atualizar-perfis" title="Copia de novo os perfis do seu navegador"><i class="fa-regular fa-copy"></i> Recopiar perfis</button>
+    <button class="btn btn-ghost" id="btn-pasta"><i class="fa-regular fa-folder-open"></i> Abrir pasta</button>
+    <button class="btn btn-ghost" id="btn-recarregar-scripts" title="Lê os arquivos da pasta de novo e recarrega as abas"><i class="fa-solid fa-arrows-rotate"></i> Aplicar scripts</button>
+    <button class="btn btn-ghost" id="btn-registro" title="Abre o registro do Painel no Bloco de Notas"><i class="fa-regular fa-file-lines"></i> Ver registro</button>
+    <button class="btn btn-primary" id="btn-sair" title="Fecha o Painel de Scripts. O navegador do Painel continua aberto, mas sem os scripts."><i class="fa-solid fa-power-off"></i> Fechar Painel</button>
+  </div>
+</footer>
+
+<div class="avisos" id="avisos" aria-live="polite"></div>
+
+<div class="modal" id="editor" hidden role="dialog" aria-modal="true" aria-labelledby="ed-titulo">
+  <div class="modal-caixa">
+    <div class="modal-cab">
+      <div>
+        <h2 id="ed-titulo">Script</h2>
+        <div class="sub" id="ed-sub">&nbsp;</div>
+      </div>
+      <button class="btn-ico" id="ed-fechar" title="Fechar" aria-label="Fechar"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="modal-corpo" id="ed-corpo"></div>
+    <div class="modal-pe">
+      <span class="info" id="ed-info">Ctrl+S salva · Ctrl+F procura</span>
+      <div class="acoes">
+        <button class="btn btn-ghost" id="ed-restaurar" hidden title="Volta o Painel de Scripts para a versão que veio com o app"><i class="fa-solid fa-rotate-left"></i> Voltar ao original</button>
+        <button class="btn btn-ghost" id="ed-cancelar">Cancelar</button>
+        <button class="btn btn-primary" id="ed-salvar"><i class="fa-solid fa-floppy-disk"></i> Salvar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let E = null;
+  let abaAtual = (location.hash || '#modulos').slice(1);
+  const batidos = new Set();
+
+  async function api(url, corpo) {
+    const r = await fetch(url, {
+      method: corpo ? 'POST' : 'GET',
+      headers: { 'X-Painel': '1', 'Content-Type': 'application/json' },
+      body: corpo ? JSON.stringify(corpo) : undefined
+    });
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(json.erro || 'Falha ' + r.status);
+    return json;
+  }
+
+  function avisar(texto, tipo = 'ok', botao = null) {
+    const el = document.createElement('div');
+    el.className = 'aviso aviso-' + tipo;
+    el.innerHTML = `<i class="fa-solid ${tipo === 'ok' ? 'fa-circle-check' : 'fa-triangle-exclamation'}"></i><span>${esc(texto)}</span>`;
+    if (botao) {
+      const b = document.createElement('button');
+      b.className = 'btn btn-ghost btn-mini';
+      b.textContent = botao.texto;
+      b.addEventListener('click', () => { el.remove(); botao.acao(); });
+      el.appendChild(b);
+    }
+    $('#avisos').appendChild(el);
+    setTimeout(() => el.remove(), botao ? 12000 : (tipo === 'ok' ? 2600 : 6000));
+  }
+
+  const recarregarAbas = () => acao(() => api('/api/recarregar-scripts', {}), 'Abas recarregadas.');
+
+  async function acao(fn, okMsg) {
+    try { await fn(); if (okMsg) avisar(okMsg); }
+    catch (e) { avisar(e.message, 'erro'); }
+    atualizar();
+  }
+
+  function mostrarAba(nome) {
+    if (!['modulos'].includes(nome)) nome = 'modulos';
+    abaAtual = nome;
+    history.replaceState(null, '', '#' + nome);
+    document.querySelectorAll('.navbtn').forEach(b => {
+      const at = b.dataset.aba === nome;
+      b.classList.toggle('ativo', at);
+      b.setAttribute('aria-selected', at);
+    });
+    document.querySelectorAll('.secao').forEach(s => s.hidden = s.id !== 'sec-' + nome);
+  }
+
+  const hora = ts => ts ? new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '–';
+  const dataHora = ts => {
+    if (!ts) return '–';
+    const d = new Date(ts), hoje = new Date();
+    return d.toDateString() === hoje.toDateString()
+      ? hora(ts)
+      : d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  };
+
+  // ---------- render ----------
+  function renderBarra() {
+    const ed = E.edge;
+    $('#pasta').textContent = E.pasta;
+  }
+
+  const NV = () => (E && E.edge && E.edge.nomeNavegador) || 'Edge';
+  const abrindo = new Set();
+  function botaoPerfil(site, p) {
+    const nome = p.nome, rotulo = p.rotulo || p.nome;
+    const chave = site + '|' + nome;
+    const classe = 'perfil' + (abrindo.has(chave) ? ' abrindo' : '');
+    const conta = p.email ? ` (${p.email})` : '';
+    const titulo = p.existe ? `Abrir ${site === 'tallos' ? 'a Tallos' : 'a SmartBus'} no perfil ${rotulo}${conta}` : `O perfil "${rotulo}" não existe no ${NV()}`;
+    return `<button class="${classe}" data-abrir="${site}" data-perfil="${esc(nome)}" ${p.existe ? '' : 'disabled'} title="${esc(titulo)}">
+      <span class="perfil-nome">${esc(rotulo)}</span></button>`;
+  }
+
+  function listaPerfis(site, lista) {
+    return lista.map(p =>
+      `<div class="perfil-caixa">${botaoPerfil(site, p)}
+        <button class="perfil-remover" data-remover="${esc(p.nome)}" data-site="${site}" title="Tirar ${esc(p.nome)} desta lista" aria-label="Tirar ${esc(p.nome)} desta lista">×</button></div>`).join('') +
+      (lista.length ? '' : `<div class="sem-perfis">Nenhum perfil na lista. Clique em <strong>Escanear perfis</strong> para puxar todos os perfis do ${NV()}.</div>`) +
+      '';
+  }
+
+  function renderAtalhos() {
+    const a = E.atalhos;
+    $('#abrir-ao-iniciar').checked = E.edge.abrirAoIniciar;
+    document.querySelectorAll('.nv').forEach(el => { el.textContent = NV(); });
+    document.querySelectorAll('[data-nav]').forEach(b => {
+      const info = (E.edge.navegadores || []).find(n => n.id === b.dataset.nav);
+      b.setAttribute('aria-pressed', String(b.dataset.nav === E.edge.navegador));
+      b.disabled = info ? !info.instalado : false;
+      b.title = info && !info.instalado ? `${info.nome} não está instalado` : `Usar o ${info ? info.nome : b.textContent}`;
+    });
+    $('#atalho-tallos').innerHTML = listaPerfis('tallos', a.tallos);
+    $('#atalho-smartbus').innerHTML = listaPerfis('smartbus', a.smartbus);
+    const aviso = $('#edge-aviso'), ed = E.edge, btn = $('#btn-copiar-perfis');
+    btn.hidden = false; btn.disabled = false;
+    if (!ed.instalado) {
+      aviso.hidden = false; btn.hidden = true;
+      $('#edge-aviso-texto').textContent = `O ${NV()} não foi encontrado neste computador. Escolha o outro navegador acima.`;
+    } else if (ed.copia.rodando) {
+      aviso.hidden = false; btn.disabled = true;
+      $('#edge-aviso-texto').textContent = `Copiando os perfis… ${ed.copia.arquivos} arquivos (${ed.copia.mb} MB). Não abra o ${NV()} até terminar.`;
+    } else if (ed.copia.erro) {
+      aviso.hidden = false;
+      $('#edge-aviso-texto').textContent = `A cópia falhou: ${ed.copia.erro}. Tente de novo.`;
+    } else if (!ed.copiaPronta) {
+      aviso.hidden = false;
+      $('#edge-aviso-texto').textContent = `Primeiro uso no ${NV()}: o Painel trabalha com uma cópia dos perfis do seu ${NV()}, com os logins. O seu ${NV()} normal continua igual. Clique para copiar (o ${NV()} precisa estar fechado, eu fecho para você).`;
+    } else aviso.hidden = true;  }
+
+  const ORDEM_GRUPO = { SmartBus: 0, Tallos: 1, Outros: 2 };
+  function scriptsFiltrados() {
+    const busca = $('#scr-busca').value.trim().toLowerCase();
+    const grupo = $('#scr-grupo').value;
+    const soDesl = $('#scr-so-desligados').checked;
+    return (E.scripts || [])
+      .filter(s => (!busca || (s.nome + ' ' + s.descricao).toLowerCase().includes(busca)) &&
+        (!grupo || s.grupo === grupo) && (!soDesl || !s.ativo))
+      .sort((a, b) => (ORDEM_GRUPO[a.grupo] ?? 3) - (ORDEM_GRUPO[b.grupo] ?? 3) || a.nome.localeCompare(b.nome, 'pt-BR'));
+  }
+
+  function renderScripts() {
+    const todos = E.scripts || [];
+    const nRem = E.modulosRemovidos || 0;
+    $('#btn-restaurar-removidos').hidden = !nRem;
+    $('#btn-restaurar-removidos').innerHTML = `<i class="fa-solid fa-rotate-left"></i> Restaurar módulos excluídos (${nRem})`;
+    const ligados = todos.filter(s => s.ativo).length;
+    $('#scr-resumo').textContent = `${todos.length} ${todos.length === 1 ? 'script' : 'scripts'}, ${ligados} ${ligados === 1 ? 'ligado' : 'ligados'}`;
+    const lista = scriptsFiltrados();
+    if (!lista.length) {
+      $('#scr-corpo').innerHTML = `<tr><td colspan="5"><div class="vazio"><strong>Nenhum script</strong>${todos.length ? 'Mude a pesquisa ou os filtros para ver os scripts.' : 'Clique em Adicionar script para colocar o primeiro.'}</div></td></tr>`;
+      return;
+    }
+    let grupo = '', html = '';
+    for (const s of lista) {
+      if (s.grupo !== grupo) {
+        grupo = s.grupo;
+        html += `<tr class="grupo"><td colspan="5">${esc(grupo)} · ${lista.filter(x => x.grupo === grupo).length}</td></tr>`;
+      }
+      const bate = batidos.has(s.id) ? ' batendo' : '';
+      html += `<tr>
+      <td><div class="nome">${esc(s.nome)}${s.embutido ? '' : '<span class="selo-mini">adicionado</span>'}${s.editado ? '<span class="selo-mini">editado</span>' : ''}</div>
+        ${s.descricao && s.descricao !== s.nome ? `<div class="desc">${esc(s.descricao)}</div>` : ''}</td>
+      <td><div class="sites">${s.sites.map(x => `<span class="tag">${esc(x)}</span>`).join('') || '<span class="leve">Nenhum</span>'}</div></td>
+      <td class="num">${esc(s.versao || '–')}</td>
+      <td class="col-sit"><button class="carimbo ${s.ativo ? 'c-rec' : 'c-canc desl'}${bate}" data-script-liga="${esc(s.id)}" data-ativo="${s.ativo}" aria-pressed="${s.ativo}" title="${s.ativo ? 'Clique para desligar' : 'Clique para ligar'}">${s.ativo ? 'Ligado' : 'Desligado'}</button></td>
+      <td class="col-acoes">
+        <button class="btn-ico" data-editar="${esc(s.id)}" title="Ver e editar o código" aria-label="Ver e editar o código de ${esc(s.nome)}"><i class="fa-solid fa-code"></i></button>
+        <button class="btn-ico perigo" data-remover-script="${esc(s.id)}" title="Excluir script" aria-label="Excluir ${esc(s.nome)}"><i class="fa-regular fa-trash-can"></i></button>
+      </td></tr>`;
+    }
+    $('#scr-corpo').innerHTML = html;
+    batidos.clear();
+  }
+
+  function render() {
+    if (!E) return;
+    renderBarra();
+    renderScripts();
+    renderAtalhos();
+  }
+
+  let pedindo = false, de_novo = false;
+  async function atualizar() {
+    if (pedindo) { de_novo = true; return; }
+    pedindo = true;
+    try {
+      E = await api('/api/estado');
+      $('#offline').hidden = true;
+      render();
+    } catch {
+      $('#offline').hidden = false;
+    } finally {
+      pedindo = false;
+      if (de_novo) { de_novo = false; atualizar(); }
+    }
+  }
+
+  // ---------- eventos ----------
+  document.querySelectorAll('.navbtn').forEach(b => b.addEventListener('click', () => mostrarAba(b.dataset.aba)));
+  document.addEventListener('click', e => {
+    const rem = e.target.closest('[data-remover]');
+    if (rem) {
+      const nome = rem.dataset.remover, site = rem.dataset.site;
+      if (!confirm(`Tirar o perfil ${nome} da lista? O perfil não é apagado do ${NV()}.`)) return;
+      return acao(() => api('/api/perfil/remover', { site, nome }), `${nome} saiu da lista`);
+    }
+    const abrir = e.target.closest('[data-abrir]');
+    if (abrir && !abrir.disabled) {
+      const site = abrir.dataset.abrir, perfil = abrir.dataset.perfil;
+      const chave = site + '|' + perfil;
+      abrindo.add(chave); renderAtalhos();
+      return api('/api/abrir', { site, perfil })
+        .then(r => r.semControle
+          ? avisar('Abriu, mas sem o Painel conectado.', 'erro')
+          : avisar(`${site === 'tallos' ? 'Tallos' : 'SmartBus'} aberta no perfil ${perfil}`))
+        .catch(err => avisar(err.message, 'erro'))
+        .finally(() => { abrindo.delete(chave); atualizar(); });
+    }
+    const b = e.target.closest('[data-aba-id]');
+    if (b) return acao(() => api('/api/aba', { id: b.dataset.abaId, acao: b.dataset.acao }));
+  });
+
+
+  $('#btn-restaurar-removidos').addEventListener('click', () =>
+    acao(async () => {
+      const r = await api('/api/scripts/restaurar-removidos', {});
+      avisar(`${r.n} ${r.n === 1 ? 'módulo voltou' : 'módulos voltaram'} para a lista.`, 'ok', { texto: 'Recarregar abas', acao: recarregarAbas });
+    }));
+
+  $('#btn-pasta').addEventListener('click', () => acao(() => api('/api/pasta', {})));
+  $('#btn-registro').addEventListener('click', () => acao(() => api('/api/registro', {})));
+  $('#btn-sair').addEventListener('click', async () => {
+    if (!confirm('Fechar o Painel de Scripts? Os scripts param de funcionar nas abas até você abrir o Painel de novo.')) return;
+    try { await api('/api/sair', {}); } catch {}
+    document.body.innerHTML = '<div style="display:grid;place-items:center;min-height:100vh;font:600 18px Barlow,sans-serif;color:#4b5260;text-align:center;padding:24px">O Painel de Scripts foi fechado.<br>Para abrir de novo, use o atalho na Área de Trabalho ou no Menu Iniciar.</div>';
+    setTimeout(() => window.close(), 1500);
+  });
+  async function copiarPerfis() {
+    try {
+      let r = await api('/api/copiar-perfis', {});
+      if (r.precisaFechar) {
+        if (!confirm(`O ${NV()} está aberto. Fechar todas as janelas do ${NV()} para copiar os perfis? Depois você pode abrir o seu ${NV()} normal de novo.`)) return;
+        r = await api('/api/copiar-perfis', { fecharEdge: true });
+      }
+      avisar(`Copiando os perfis. Quando terminar, o ${NV()} do Painel abre sozinho.`);
+    } catch (e) { avisar(e.message, 'erro'); }
+    atualizar();
+  }
+  $('#btn-copiar-perfis').addEventListener('click', copiarPerfis);
+
+  document.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', () => {
+    if (b.getAttribute('aria-pressed') === 'true') return;
+    acao(() => api('/api/navegador', { id: b.dataset.nav }), `Agora o Painel abre no ${b.textContent}.`);
+  }));
+
+  $('#abrir-ao-iniciar').addEventListener('change', e =>
+    acao(() => api('/api/config', { abrirAoIniciar: e.target.checked }),
+      e.target.checked ? 'Ao abrir o Painel, a Tallos e a SmartBus vão abrir sozinhas em todos os perfis das listas.' : 'Abrir sozinho ao iniciar desligado.'));
+
+  document.querySelectorAll('[data-escanear]').forEach(b => b.addEventListener('click', async () => {
+    const site = b.dataset.escanear;
+    b.disabled = true;
+    try {
+      const r = await api('/api/perfis/escanear', { site });
+      avisar(r.nomes.length
+        ? `${r.nomes.length} perfis na lista da ${site === 'tallos' ? 'Tallos' : 'SmartBus'}. Use o × para tirar os que não quiser.${r.pulados ? ' Alguns arquivos estavam em uso; se algum perfil pedir login, entre uma vez.' : ''}`
+        : `Nenhum perfil encontrado no ${NV()}.`);
+    } catch (e) { avisar(e.message, 'erro'); }
+    b.disabled = false;
+    atualizar();
+  }));
+
+  $('#btn-atualizar-perfis').addEventListener('click', () => {
+    if (confirm(`Copiar de novo os perfis do seu ${NV()}? A cópia atual do Painel será substituída (logins feitos só no ${NV()} do Painel serão perdidos).`)) copiarPerfis();
+  });
+
+  $('#btn-recarregar-scripts').addEventListener('click', () =>
+    acao(() => api('/api/recarregar-scripts', {}), 'Script aplicado. As abas conectadas foram recarregadas.'));
+
+  // ---------- Editor de scripts ----------
+  const MODELO = `// ==UserScript==
+// @name         Meu script
+// @version      1.0
+// @description  O que este script faz
+// @match        *://*.smarttravelit.com/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // seu código aqui
+    // Pode colar qualquer script do Tampermonkey: o app liga e desliga sozinho,
+    // desfazendo o que o script colocou na página (botões, eventos, timers).
+
+})();
+`;
+  const ed = { id: null, novo: false, original: null, salvo: '', cm: null, area: null };
+
+  function textoEditor() { return ed.cm ? ed.cm.getValue() : ed.area.value; }
+  function mudouEditor() { return textoEditor() !== ed.salvo; }
+
+  function criarEditor(texto) {
+    const corpo = $('#ed-corpo');
+    corpo.innerHTML = '';
+    ed.cm = null; ed.area = null;
+    if (window.CodeMirror) {
+      ed.cm = CodeMirror(corpo, {
+        value: texto, mode: 'javascript', lineNumbers: true, indentUnit: 4, tabSize: 4,
+        matchBrackets: true, lineWrapping: false, viewportMargin: 30,
+        extraKeys: { 'Ctrl-S': () => salvarEditor(), 'Cmd-S': () => salvarEditor() }
+      });
+      ed.cm.on('cursorActivity', () => {
+        const c = ed.cm.getCursor();
+        $('#ed-info').textContent = `Linha ${c.line + 1}, coluna ${c.ch + 1} · ${ed.cm.lineCount()} linhas · Ctrl+S salva · Ctrl+F procura`;
+      });
+      setTimeout(() => { ed.cm.refresh(); ed.cm.focus(); }, 30);
+    } else {
+      ed.area = document.createElement('textarea');
+      ed.area.className = 'codigo';
+      ed.area.spellcheck = false;
+      ed.area.value = texto;
+      ed.area.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); salvarEditor(); } });
+      corpo.appendChild(ed.area);
+      ed.area.focus();
+    }
+  }
+
+  function abrirEditor({ id = null, nome = 'Novo script', texto, novo = false, original = null, sub = '' }) {
+    Object.assign(ed, { id, novo, original, salvo: novo ? '' : texto });
+    $('#ed-titulo').textContent = novo ? 'Adicionar script' : nome;
+    $('#ed-sub').textContent = sub;
+    $('#ed-restaurar').hidden = !original;
+    $('#ed-salvar').innerHTML = novo ? '<i class="fa-solid fa-plus"></i> Adicionar' : '<i class="fa-solid fa-floppy-disk"></i> Salvar';
+    $('#ed-info').textContent = 'Ctrl+S salva · Ctrl+F procura';
+    $('#ed-info').classList.remove('erro');
+    $('#editor').hidden = false;
+    criarEditor(texto);
+  }
+
+  function fecharEditor(forcar = false) {
+    if (!forcar && mudouEditor() && !confirm('Fechar sem salvar? As mudanças serão perdidas.')) return;
+    $('#editor').hidden = true;
+    $('#ed-corpo').innerHTML = '';
+    ed.cm = null; ed.area = null;
+  }
+
+  async function salvarEditor() {
+    const codigo = textoEditor();
+    const btn = $('#ed-salvar');
+    btn.disabled = true;
+    try {
+      const r = await api(ed.novo ? '/api/scripts/novo' : '/api/scripts/salvar', { id: ed.id, codigo });
+      ed.salvo = codigo;
+      fecharEditor(true);
+      const extra = r.falhas && r.falhas.length ? ` Não consegui baixar ${r.falhas.length} biblioteca(s) do @require.` : '';
+      avisar(`${r.nome} ${ed.novo ? 'adicionado' : 'salvo'}. Vale nas abas que você abrir ou recarregar.${extra}`, extra ? 'erro' : 'ok',
+        { texto: 'Recarregar abas', acao: recarregarAbas });
+    } catch (e) {
+      $('#ed-info').textContent = e.message;
+      $('#ed-info').classList.add('erro');
+    }
+    btn.disabled = false;
+    atualizar();
+  }
+
+  ['#scr-busca', '#scr-grupo', '#scr-so-desligados'].forEach(id =>
+    $(id).addEventListener(id === '#scr-busca' ? 'input' : 'change', renderScripts));
+
+  function alternarTodos(ativo) {
+    const lista = scriptsFiltrados();
+    if (!lista.length) return;
+    const grupo = $('#scr-grupo').value;
+    const busca = $('#scr-busca').value.trim();
+    lista.forEach(s => { if (s.ativo !== ativo) batidos.add(s.id); s.ativo = ativo; });
+    renderScripts();
+    acao(async () => {
+      if (!busca && !$('#scr-so-desligados').checked) await api('/api/scripts/todos', { ativo, grupo });
+      else for (const s of lista) await api('/api/script', { id: s.id, ativo });
+      avisar(`${lista.length} scripts ${ativo ? 'ligados' : 'desligados'}.`);
+    });
+  }
+  $('#btn-ligar-todos').addEventListener('click', () => alternarTodos(true));
+  $('#btn-desligar-todos').addEventListener('click', () => alternarTodos(false));
+
+  $('#btn-novo-script').addEventListener('click', () => abrirEditor({ texto: MODELO, novo: true,
+    sub: 'Cole o código do script (com o cabeçalho ==UserScript==) ou edite o modelo.' }));
+  $('#scr-arquivo').addEventListener('change', async e => {
+    const arq = e.target.files[0];
+    e.target.value = '';
+    if (!arq) return;
+    abrirEditor({ texto: await arq.text(), novo: true, sub: `Arquivo: ${arq.name}. Confira e clique em Adicionar.` });
+  });
+  $('#ed-fechar').addEventListener('click', () => fecharEditor());
+  $('#ed-cancelar').addEventListener('click', () => fecharEditor());
+  $('#ed-salvar').addEventListener('click', salvarEditor);
+  $('#ed-restaurar').addEventListener('click', () => {
+    if (!ed.original || !confirm('Trocar o código pelo original do app? Suas mudanças neste script serão perdidas ao salvar.')) return;
+    if (ed.cm) ed.cm.setValue(ed.original); else ed.area.value = ed.original;
+  });
+  $('#editor').addEventListener('keydown', e => { if (e.key === 'Escape' && !document.querySelector('.CodeMirror-dialog')) fecharEditor(); });
+
+  $('#scr-corpo').addEventListener('click', async e => {
+    const liga = e.target.closest('[data-script-liga]');
+    if (liga) {
+      const id = liga.dataset.scriptLiga, ativo = liga.dataset.ativo !== 'true';
+      const s = (E.scripts || []).find(x => x.id === id);
+      if (s) { s.ativo = ativo; batidos.add(id); renderScripts(); }
+      return acao(async () => {
+        const r = await api('/api/script', { id, ativo });
+        const msg = `${s ? s.nome : 'Script'} ${ativo ? 'ligado' : 'desligado'}`;
+        if (r.aoVivo) avisar(msg + '.');
+        else avisar(msg + '. Recarregue as abas para aplicar.', 'ok', { texto: 'Recarregar abas', acao: recarregarAbas });
+      });
+    }
+    const editar = e.target.closest('[data-editar]');
+    if (editar) {
+      try {
+        const r = await api('/api/scripts/codigo', { id: editar.dataset.editar });
+        abrirEditor({ id: r.id, nome: r.nome, texto: r.codigo, original: r.original,
+          sub: r.embutido ? 'Este módulo vem com o app. Se algo der errado, use "Voltar ao original".' : 'Script adicionado por você.' });
+      } catch (err) { avisar(err.message, 'erro'); }
+      return;
+    }
+    const rem = e.target.closest('[data-remover-script]');
+    if (rem) {
+      const s = (E.scripts || []).find(x => x.id === rem.dataset.removerScript);
+      const texto = s && s.embutido
+        ? `Excluir o módulo "${s.nome}"? Ele sai da lista e para de rodar nas abas. Dá para trazer de volta depois em "Restaurar módulos excluídos", no rodapé.`
+        : `Excluir o script "${s ? s.nome : ''}"? Ele sai da lista e para de rodar nas abas.`;
+      if (!confirm(texto)) return;
+      return acao(() => api('/api/scripts/remover', { id: rem.dataset.removerScript }), `${s ? s.nome : 'Script'} excluído.`);
+    }
+  });
+
+  mostrarAba(abaAtual);
+  atualizar();
+  try {
+    const ev = new EventSource('/eventos');
+    ev.onmessage = () => atualizar();
+  } catch {}
+  setInterval(atualizar, 15000);
+})();
+</script>
+</body>
+</html>

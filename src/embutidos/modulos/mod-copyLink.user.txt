@@ -1,0 +1,122 @@
+// ==UserScript==
+// @name         Copiar Link
+// @version      1.5.0
+// @description  Copiar Link (modal de compartilhamento)
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 13 — Copiar Link (modal de compartilhamento)
+// =========================================================================
+function criarModuloCopiarLink() {
+    const ESTILO_ID = 'tmm-copiar-link-style';
+    let observer = null;
+
+    function garantirEstilo() {
+        if (document.getElementById(ESTILO_ID)) return;
+        const style = document.createElement('style');
+        style.id = ESTILO_ID;
+        style.textContent = `
+            .smart-copy-wrapper {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .smart-copy-wrapper input[type="text"] {
+                flex: 1;
+            }
+            .smart-copy-btn {
+                padding: 6px 14px;
+                background: #2563eb;
+                color: #fff;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+                font-size: 13px;
+                white-space: nowrap;
+                transition: background-color .2s ease;
+            }
+            .smart-copy-btn:hover {
+                background: #3b82f6;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // Reaproveitável por outros módulos: verifica se o módulo com esse id está ativo no painel
+    function isEnabled(id) {
+        const mod = modulos.find(m => m.id === id);
+        return mod ? !!mod._ativo : false;
+    }
+
+    // Troca o texto do botão temporariamente (feedback de "copiado") e depois volta ao original
+    function setCopiedState(btn, textoTemporario, textoOriginal, duracaoMs = 1500) {
+        btn.textContent = textoTemporario;
+        setTimeout(() => {
+            btn.textContent = textoOriginal;
+        }, duracaoMs);
+    }
+
+    /* ---------------- COPY LINK ---------------- */
+    function moverBotaoCopiarLink() {
+        const modal = document.querySelector('.div-lightbox-content');
+        if (!modal) return;
+        const input = modal.querySelector('input[type="text"]');
+        if (!input) return;
+        let wrapper = input.closest('.smart-copy-wrapper');
+        let btn = wrapper?.querySelector('.smart-copy-btn');
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'smart-copy-wrapper';
+            input.parentNode.insertBefore(wrapper, input);
+            wrapper.appendChild(input);
+        }
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.className = 'smart-copy-btn';
+            btn.textContent = 'Copiar link';
+            btn.onclick = async () => {
+                if (!isEnabled('copyLink')) return;
+                try {
+                    await navigator.clipboard.writeText(input.value || '');
+                    setCopiedState(btn, '✅ Copiado', 'Copiar link');
+                } catch (e) {
+                    input.select();
+                    input.setSelectionRange(0, 99999);
+                    document.execCommand('copy');
+                    setCopiedState(btn, '✅ Copiado', 'Copiar link');
+                }
+            };
+            wrapper.appendChild(btn);
+        }
+        btn.style.display = isEnabled('copyLink') ? '' : 'none';
+    }
+
+    return {
+        id: 'copyLink',
+        name: 'SMART BUS - Copiar Link',
+        defaultOn: true,
+        fixo: true, // módulo embutido no código-fonte, não pode ser excluído pelo painel
+
+        init() {
+            garantirEstilo();
+            observer = new MutationObserver(moverBotaoCopiarLink);
+            observer.observe(document.body, { childList: true, subtree: true });
+            moverBotaoCopiarLink();
+        },
+
+        destroy() {
+            if (observer) {
+                observer.disconnect();
+                observer = null;
+            }
+            document.querySelector('.smart-copy-btn')?.remove();
+        }
+    };
+}
+
+registrarModulo(criarModuloCopiarLink());
