@@ -1,40 +1,261 @@
 // ==UserScript==
-// @name         Print dos horarios e remarcacoes
-// @version      1.5.0
-// @description  Guanabara: Suporte Print dos Horários
+// @name        Crédito, Tabela de Horários e Bilhete
+// @version     1.0
+// @description Gerencia o crédito de remarcação e gera imagens da tabela de horários e do bilhete de confirmação.
 // @match        *://*.smarttravelit.com/*
 // @grupo        SmartBus
 // ==/UserScript==
-
-// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
-// sem precisar recarregar a página.
-// =========================================================================
-// MÓDULO 5 — Guanabara: Suporte Print dos Horários
-// =========================================================================
-function criarModuloGuanabara() {
+(function () {
+    'use strict';
+if (
+    location.hostname !== "prod-guanabara-frontoffice-smartbus.smarttravelit.com"
+) {
+    return;
+}
+    // =========================================================================
+    // CONFIGURAÇÕES E CONSTANTES
+    // =========================================================================
     const FONTE_PADRAO = "'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
     const MAX_ITENS_POR_IMAGEM = 15;
 
-    const DICIONARIO_CIDADES = {
-        "THE": "TERESINA", "PHB": "PARNAÍBA", "FOR": "FORTALEZA", "SLZ": "SÃO LUÍS",
-        "PIC": "PICOS", "FLR": "FLORIANO", "SOB": "SOBRAL", "CJP": "CAJUEIRO DA PRAIA",
-        "LCR": "LUÍS CORREIA", "NAT": "NATAL", "REC": "RECIFE", "JPA": "JOÃO PESSOA",
-        "MCZ": "MACEIÓ", "AJU": "ARACAJU", "SSA": "SALVADOR", "BEL": "BELÉM",
-        "IMP": "IMPERATRIZ", "PNZ": "PETROLINA", "JDO": "JUAZEIRO DO NORTE",
-        "CMP": "CAMPO MAIOR", "PIR": "PIRIPIRI", "MOS": "MOSSORÓ", "TBA": "TIANGUÁ",
-        "CCM": "CAMOCIM", "CANGA": "RECIFE (CAXANGA)",
-        "VARG": "VARGEM GRANDE", "VGE": "VARGEM GRANDE", "GYN": "GOIÂNIA", "BSB": "BRASÍLIA",
-        "TJK": "BELO HORIZONTE (TERMINAL JK)", "RIO": "RIO DE JANEIRO", "BHZ": "BELO HORIZONTE",
-        "BCN": "BARBACENA", "BTI": "BETIM - MG (TERM ADICIONAL BH)"
-    };
-
     let filaViagensGlobal = [];
     let metadadosViagemGlobal = null;
-    let linkAtual = null;
-    let intervalHashId = null;
-    let intervalBotoesId = null;
 
-    // ---- Utilitários gerais e desenho ----
+
+    // =========================================================================
+    // GERENCIAMENTO INTELIGENTE DE CRÉDITO (WIDGET COMPACTO)
+    // =========================================================================
+    function injetarEstiloBotao() {
+    if (document.getElementById("william-style-copy")) return;
+
+    const style = document.createElement("style");
+    style.id = "william-style-copy";
+
+    style.textContent = `
+       #william-copy-buttons-wrap{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    margin:0 10px;
+}
+
+.william-copy-btn{
+    min-width:90px;
+    height:34px;
+    padding:0 14px;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    background:#3F51B5;
+    color:#FFFFFF;
+
+    border:none;
+    border-radius:2px;
+
+    font-size:11px;
+    font-weight:700;
+    text-transform:uppercase;
+
+    cursor:pointer;
+
+    transition:.18s;
+}
+
+.william-copy-btn:hover{
+    background:#3949AB;
+}
+
+.william-copy-btn:active{
+    transform:translateY(1px);
+}
+    `;
+
+    document.head.appendChild(style);
+}
+    function limparCreditoCompleto() {
+        sessionStorage.removeItem("william_credito_valor");
+        sessionStorage.removeItem("william_usar_credito");
+        removerWidgetCreditoUI();
+    }
+
+    function setCreditoSalvo(valor) {
+        sessionStorage.setItem("william_credito_valor", valor.toString());
+        if (sessionStorage.getItem("william_usar_credito") === null) {
+            sessionStorage.setItem("william_usar_credito", "true");
+        }
+        atualizarWidgetCreditoUI();
+    }
+function encontrarFooterBotoes() {
+    return document.querySelector('.div-process-footer-buttons');
+}
+
+function encontrarBotaoNovaPesquisaDentroFooter(footer) {
+    if (!footer) return null;
+
+    return Array.from(footer.querySelectorAll("button"))
+        .find(btn =>
+            (btn.innerText || "").toUpperCase().includes("NOVA PESQUISA")
+        );
+}
+function ajustarFonte(ctx, texto, larguraMax, fonteInicial, fonteMinima = 12) {
+
+    let tamanho = fonteInicial;
+
+    while (tamanho > fonteMinima) {
+        ctx.font = `bold ${tamanho}px ${FONTE_PADRAO}`;
+
+        if (ctx.measureText(texto).width <= larguraMax)
+            break;
+
+        tamanho--;
+    }
+
+    return tamanho;
+}
+function encontrarFilhoDiretoDoFooter(footer, el) {
+    if (!footer || !el) return null;
+
+    let atual = el;
+
+    while (atual && atual.parentElement && atual.parentElement !== footer) {
+        atual = atual.parentElement;
+    }
+
+    return atual;
+}
+    function getCreditoSalvo() {
+        const usar = sessionStorage.getItem("william_usar_credito");
+        if (usar !== "true") return 0;
+        const valor = sessionStorage.getItem("william_credito_valor");
+        return valor ? parseFloat(valor) : 0;
+    }
+
+    function getValorBrutoCredito() {
+        const valor = sessionStorage.getItem("william_credito_valor");
+        return valor ? parseFloat(valor) : 0;
+    }
+
+    function atualizarWidgetCreditoUI() {
+        let valorBruto = getValorBrutoCredito();
+        let widget = document.getElementById('william-credito-panel');
+
+        if (valorBruto <= 0) {
+            if (widget) widget.remove();
+            return;
+        }
+
+        if (!widget) {
+            widget = document.createElement('div');
+            widget.id = 'william-credito-panel';
+            widget.style = "position:fixed; top:20px; right:20px; z-index:999998; background:#ffffff; border:1px solid #E2E8F0; padding:10px 12px; border-radius:12px; box-shadow:0 8px 25px rgba(15, 23, 42, 0.15); font-family:" + FONTE_PADRAO + "; width:250px; display:flex; flex-direction:column; gap:8px; transition: opacity 0.2s;";
+            document.body.appendChild(widget);
+        }
+
+        let usando = sessionStorage.getItem("william_usar_credito") === "true";
+
+        widget.innerHTML = `
+            <!-- Barra Superior Arrastável -->
+            <div id="w-credito-handle" style="cursor:grab; display:flex; justify-content:space-between; align-items:center; padding-bottom:6px; border-bottom:1px solid #F1F5F9;" title="Clique e arraste">
+                <div style="font-weight:700; color:#0F172A; font-size:12px; display:flex; align-items:center; gap:4px;">
+                    <span style="font-size:14px;">💳</span> Saldo
+                </div>
+                <div style="background:#ECFDF5; color:#059669; padding:2px 8px; border-radius:12px; font-size:12px; font-weight:800; border:1px solid #A7F3D0;">
+                    R$ ${valorBruto.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                </div>
+            </div>
+
+            <div style="font-size:11px; color:#475569; line-height:1.2;">
+                Utilizar saldo para abater?
+            </div>
+
+            <!-- Botões Menores -->
+            <div style="display:flex; gap:6px;">
+                <button id="w-btn-sim" style="flex:1; padding:6px; border-radius:6px; font-weight:700; font-size:11px; cursor:pointer; transition:all 0.2s; border:none; background:${usando ? '#2563EB' : '#F1F5F9'}; color:${usando ? '#FFFFFF' : '#64748B'}; box-shadow:${usando ? '0 2px 5px rgba(37, 99, 235, 0.3)' : 'none'};">
+                    ${usando ? '✓ Sim' : 'Sim'}
+                </button>
+                <button id="w-btn-nao" style="flex:1; padding:6px; border-radius:6px; font-weight:700; font-size:11px; cursor:pointer; transition:all 0.2s; border:none; background:${!usando ? '#475569' : '#F1F5F9'}; color:${!usando ? '#FFFFFF' : '#64748B'}; box-shadow:${!usando ? '0 2px 5px rgba(71, 85, 105, 0.3)' : 'none'};">
+                    ${!usando ? '✓ Não' : 'Não'}
+                </button>
+                <button id="w-btn-limpar" style="width:28px; border-radius:6px; font-weight:bold; cursor:pointer; border:none; background:#FEF2F2; color:#EF4444; font-size:12px; display:flex; align-items:center; justify-content:center; transition:background 0.2s;" title="Descartar Crédito">
+                    ✕
+                </button>
+            </div>
+        `;
+
+        document.getElementById('w-btn-sim').onclick = () => {
+            sessionStorage.setItem("william_usar_credito", "true");
+            atualizarWidgetCreditoUI();
+        };
+
+        document.getElementById('w-btn-nao').onclick = () => {
+            sessionStorage.setItem("william_usar_credito", "false");
+            atualizarWidgetCreditoUI();
+        };
+
+        document.getElementById('w-btn-limpar').onclick = () => {
+            limparCreditoCompleto();
+        };
+
+        tornarPainelArrastavel(widget, document.getElementById('w-credito-handle'));
+    }
+
+    function tornarPainelArrastavel(painel, alca) {
+        let isDragging = false;
+        let dragStartX, dragStartY;
+        let initialX, initialY;
+
+        function onMouseMove(e) {
+            if (!isDragging) return;
+            const dx = e.clientX - dragStartX;
+            const dy = e.clientY - dragStartY;
+
+            painel.style.right = 'auto';
+            painel.style.bottom = 'auto';
+            painel.style.left = `${initialX + dx}px`;
+            painel.style.top = `${initialY + dy}px`;
+        }
+
+        function onMouseUp() {
+            if (isDragging) {
+                isDragging = false;
+                alca.style.cursor = 'grab';
+                painel.style.opacity = '1';
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+            }
+        }
+
+        alca.onmousedown = function(e) {
+            if(e.target.tagName === 'BUTTON') return;
+
+            isDragging = true;
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+
+            const rect = painel.getBoundingClientRect();
+            initialX = rect.left;
+            initialY = rect.top;
+
+            alca.style.cursor = 'grabbing';
+            painel.style.opacity = '0.9';
+
+            e.preventDefault();
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        };
+    }
+
+    function removerWidgetCreditoUI() {
+        let widget = document.getElementById('william-credito-panel');
+        if (widget) widget.remove();
+    }
+
+    // =========================================================================
+    // UTILITÁRIOS GERAIS E DESENHO
+    // =========================================================================
     function formatarMoeda(valor) { return "R$ " + valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 }); }
 
     function extrairNumero(texto) {
@@ -62,20 +283,71 @@ function criarModuloGuanabara() {
         }
     }
 
-    function limparCidade(nome) {
-        if (!nome) return "---";
-        let limpo = nome.replace(/\s*\(TERM[^\)]+\)/gi, '').replace(/^[A-Z]+\s*-\s*/i, '').replace(/\s*-\s*[A-Z]{2}(\s|$)/i, '').replace(/\s*\([A-Z]{2}\)/gi, '').trim();
-        let partes = limpo.split('(');
-        let base = partes[0].trim().toUpperCase();
-        let terminal = partes.length > 1 ? " (" + partes[1] : "";
-        if (DICIONARIO_CIDADES[base]) base = DICIONARIO_CIDADES[base];
-        return (base + terminal).trim();
+function limparCidade(nome) {
+
+    if (!nome) return "---";
+
+    if (nome.startsWith("FOR -"))
+        return "FORTALEZA (JOÃO THOMÉ) - CE";
+
+    if (nome.startsWith("RIO -"))
+        return "RIO DE JANEIRO (NOVO RIO) - RJ";
+
+    if (nome.startsWith("SAO -"))
+        return "SÃO PAULO (TIETÊ) - SP";
+
+    if (nome.startsWith("BSB -"))
+        return "BRASÍLIA (INTERESTADUAL) - DF";
+
+    return nome
+        .replace(/^[A-Z0-9]{2,6}\s*-\s*/, "")
+        .trim();
+}
+
+    let linkAtual = window.location.hash;
+    setInterval(() => {
+        if (window.location.hash !== linkAtual) {
+            linkAtual = window.location.hash;
+            let rotaBase = linkAtual.split('?')[0];
+            const rotasRaiz = ['#/', '#/home', '#/dashboard', ''];
+
+            if (rotasRaiz.includes(rotaBase)) {
+                limparCreditoCompleto();
+                filaViagensGlobal = [];
+            }
+        }
+    }, 1000);
+
+    // =========================================================================
+    // LÓGICA DA TABELA DE HORÁRIOS E IMAGEM
+    // =========================================================================
+    function capturarValorLiquido() {
+        const ths = Array.from(document.querySelectorAll('th'));
+        const idx = ths.findIndex(th => th.innerText.toUpperCase().includes('LÍQUIDO'));
+        if (idx !== -1) {
+            const td = document.querySelector('tbody tr td:nth-child(' + (idx + 1) + ')');
+            if (td && !td.dataset.marcado) {
+                const valorNum = extrairNumero(td.innerText);
+                if (valorNum > 0) {
+                    setCreditoSalvo(valorNum);
+                    td.style.backgroundColor = "#d4edda";
+                    td.style.border = "3px solid #28a745";
+                    td.dataset.marcado = "true";
+                }
+            }
+        }
     }
 
-    // ---- Lógica da tabela de horários e imagem ----
     function capturarTrecho() {
-        let origem = document.querySelector('#txt-origem')?.value || "";
-        let destino = document.querySelector('#txt-destino')?.value || "";
+        let origem =
+    document.querySelector(".b-search-origin")?.innerText ||
+    document.querySelector("#txt-origem")?.value ||
+    "";
+
+let destino =
+    document.querySelector(".b-search-destination")?.innerText ||
+    document.querySelector("#txt-destino")?.value ||
+    "";
         if (!origem || !destino) {
             const textoTopo = document.body.innerText.substring(0, 1500);
             const match = textoTopo.match(/de\s+(.*)\s+para\s+(.*?)(?:\n|em |$)/i);
@@ -106,9 +378,51 @@ function criarModuloGuanabara() {
         }
         return "";
     }
+function desenharTextoMultilinha(ctx, texto, x, y, larguraMax, alturaLinha) {
 
-    function desenharECopiarImagemTabela(dados) {
-        const btn = document.getElementById('btn-copy-william');
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = `bold 18px ${FONTE_PADRAO}`;
+
+    const palavras = texto.split(" ");
+
+    let linha = "";
+    let linhas = [];
+
+    for (const palavra of palavras) {
+
+        const teste = linha + palavra + " ";
+
+        if (ctx.measureText(teste).width > larguraMax) {
+
+            linhas.push(linha.trim());
+            linha = palavra + " ";
+
+        } else {
+
+            linha = teste;
+
+        }
+    }
+
+    if (linha.trim())
+        linhas.push(linha.trim());
+
+    linhas = linhas.slice(0, 4);
+
+    linhas.forEach((l, i) => {
+
+        ctx.fillText(
+            l,
+            x,
+            y + (i * alturaLinha)
+        );
+
+    });
+
+    return linhas.length;
+}
+function desenharECopiarImagemTabela(dados, idBotao = "btn-copy-william") {
+       const btn = document.getElementById(idBotao);
 
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
@@ -120,8 +434,9 @@ function criarModuloGuanabara() {
         let temConexao = dados.viagens.some(v => v.isConexao);
         let temDireta = dados.viagens.some(v => !v.isConexao);
         let soConexao = temConexao && !temDireta;
-
-        let altura = 115;
+    const alturaCabecalho = 135;
+        let altura = alturaCabecalho + 55;
+        if (dados.credito > 0) altura += 105;
         altura += (dados.viagens.length * (alturaCartao + espacoEntreCartoes));
         if (temConexao && temDireta) altura += 50;
         if (soConexao) altura += 50;
@@ -133,7 +448,8 @@ function criarModuloGuanabara() {
         ctx.fillRect(0, 0, largura, altura);
 
         ctx.fillStyle = '#283593';
-        ctx.fillRect(0, 0, largura, 95);
+
+ctx.fillRect(0, 0, largura, alturaCabecalho);
 
         let locOrigem = "ORIGEM", locDestino = "DESTINO";
         if(dados.trecho) {
@@ -147,42 +463,52 @@ function criarModuloGuanabara() {
             }
         }
 
-        let tituloTopo = "Passagem de ônibus";
-        if (locDestino !== "") {
-            tituloTopo += ` de ${locOrigem} para ${locDestino}`;
-        } else {
-            tituloTopo += ` ${locOrigem}`;
+
+ctx.font = `bold 14px ${FONTE_PADRAO}`;
+ctx.fillStyle = "#FFFFFF";
+
+ctx.fillText("ORIGEM", margem, 24);
+ctx.fillText("DESTINO", largura / 2 + 20, 24);
+
+
+const linhasOrigem = desenharTextoMultilinha(
+    ctx,
+    locOrigem,
+    margem,
+    48,
+    320,
+    22
+);
+
+desenharTextoMultilinha(
+    ctx,
+    locDestino,
+    largura / 2 + 20,
+    48,
+    320,
+    22
+);
+
+ctx.fillStyle = "#FFC107";
+ctx.font = `bold 16px ${FONTE_PADRAO}`;
+
+const yData = 48 + (linhasOrigem * 22) + 12;
+
+ctx.fillText(`📅 ${dados.dataTexto}`, margem, yData);
+
+let yAtual = alturaCabecalho + 20;
+
+        if (dados.credito > 0) {
+            desenharRetanguloArredondado(ctx, margem, yAtual, largura - (margem * 2), 85, 8, '#F8FAFC', '#CBD5E1');
+            ctx.fillStyle = '#0F172A';
+            ctx.font = `bold 16px ${FONTE_PADRAO}`;
+            ctx.fillText(`💰 Crédito aplicado: ${formatarMoeda(dados.credito)}`, margem + 20, yAtual + 30);
+            ctx.fillStyle = '#475569';
+            ctx.font = `13px ${FONTE_PADRAO}`;
+            ctx.fillText('ℹ️ Valores incluem Seguro Viagem opcional. Caso não deseje a cobertura, haverá uma', margem + 20, yAtual + 55);
+            ctx.fillText('redução entre R$ 6,00 a R$ 16,00.', margem + 42, yAtual + 73);
+            yAtual += 105;
         }
-
-        let extraAviso = (dados.temMaisRestantes || (!dados.temMaisRestantes && soConexao)) ? " (Continuação)" : "";
-        if(dados.isPrimeiroLote && !dados.temMaisRestantes) extraAviso = "";
-        if(dados.isPrimeiroLote && dados.temMaisRestantes) extraAviso = " (Parte 1)";
-        tituloTopo += extraAviso;
-
-        ctx.fillStyle = '#FFFFFF';
-        let fSize = 22;
-        let maxWidthTitulo = largura - (margem * 2);
-        ctx.font = `bold ${fSize}px ${FONTE_PADRAO}`;
-
-        while(ctx.measureText(tituloTopo).width > maxWidthTitulo && fSize > 14) {
-            fSize--;
-            ctx.font = `bold ${fSize}px ${FONTE_PADRAO}`;
-        }
-
-        if (ctx.measureText(tituloTopo).width > maxWidthTitulo) {
-            while (ctx.measureText(tituloTopo + "...").width > maxWidthTitulo && tituloTopo.length > 0) {
-                tituloTopo = tituloTopo.slice(0, -1);
-            }
-            tituloTopo += "...";
-        }
-
-        ctx.fillText(tituloTopo, margem, 45);
-
-        ctx.fillStyle = '#FFC107';
-        ctx.font = `bold 16px ${FONTE_PADRAO}`;
-        ctx.fillText(`📅 ${dados.dataTexto}`, margem, 75);
-
-        let yAtual = 120;
 
         let desenhouDivisor = false;
 
@@ -238,44 +564,91 @@ function criarModuloGuanabara() {
             let displayDestino = locDestino.length > 20 ? locDestino.substring(0,20)+"..." : locDestino;
             ctx.fillText(displayDestino, centerCard + 120, yAtual + 65);
 
-            ctx.textAlign = 'right';
-            let displayValor = v.displayValor;
-            if (displayValor.toUpperCase() === "ISENTO") {
-                let isentoW = 75;
-                desenharRetanguloArredondado(ctx, largura - margem - 30 - isentoW, yAtual + 35, isentoW, 30, 6, '#F1F5F9', '#CBD5E1');
-                ctx.textAlign = 'center';
-                ctx.fillStyle = '#334155';
-                ctx.font = `bold 13px ${FONTE_PADRAO}`;
-                ctx.fillText("ISENTO", largura - margem - 30 - (isentoW/2), yAtual + 55);
-            } else {
-                let prefixo = "";
-                let valorStr = displayValor;
-                if (displayValor.includes("R$")) {
-                    const parts = displayValor.split("R$");
-                    prefixo = parts[0].trim();
-                    valorStr = "R$ " + parts[1].trim();
-                }
+          ctx.textAlign = 'right';
+let displayValor = v.displayValor;
 
-                ctx.fillStyle = '#64748B'; ctx.font = `600 12px ${FONTE_PADRAO}`;
-                ctx.fillText(prefixo, largura - margem - 30, yAtual + 35);
+if (displayValor.toUpperCase() === "ISENTO") {
 
-                ctx.fillStyle = '#E65100';
-                if (valorStr.includes(",")) {
-                    let valParts = valorStr.split(",");
-                    let reais = valParts[0];
-                    let cents = "," + valParts[1];
+    let isentoW = 75;
+    desenharRetanguloArredondado(
+        ctx,
+        largura - margem - 30 - isentoW,
+        yAtual + 35,
+        isentoW,
+        30,
+        6,
+        '#F1F5F9',
+        '#CBD5E1'
+    );
 
-                    ctx.font = `bold 14px ${FONTE_PADRAO}`;
-                    let centWidth = ctx.measureText(cents).width;
-                    ctx.fillText(cents, largura - margem - 30, yAtual + 65);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#334155';
+    ctx.font = `bold 13px ${FONTE_PADRAO}`;
+    ctx.fillText("ISENTO", largura - margem - 30 - (isentoW / 2), yAtual + 55);
 
-                    ctx.font = `bold 24px ${FONTE_PADRAO}`;
-                    ctx.fillText(reais, largura - margem - 30 - centWidth, yAtual + 65);
-                } else {
-                    ctx.font = `bold 24px ${FONTE_PADRAO}`;
-                    ctx.fillText(valorStr, largura - margem - 30, yAtual + 65);
-                }
-            }
+} else if (displayValor.toUpperCase() === "ESGOTADO") {
+
+    const larguraBox = 118;
+    const alturaBox = 34;
+
+    desenharRetanguloArredondado(
+        ctx,
+        largura - margem - 30 - larguraBox,
+        yAtual + 33,
+        larguraBox,
+        alturaBox,
+        8,
+        "#FFF5F5",
+        "#FECACA"
+    );
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#EA580C";
+    ctx.font = `bold 15px ${FONTE_PADRAO}`;
+
+    ctx.fillText(
+        "ESGOTADO",
+        largura - margem - 30 - (larguraBox / 2),
+        yAtual + 56
+    );
+
+} else {
+
+    let prefixo = "";
+    let valorStr = displayValor;
+
+    if (displayValor.includes("R$")) {
+        const parts = displayValor.split("R$");
+        prefixo = parts[0].trim();
+        valorStr = "R$ " + parts[1].trim();
+    }
+
+    ctx.fillStyle = '#64748B';
+    ctx.font = `600 12px ${FONTE_PADRAO}`;
+    ctx.fillText(prefixo, largura - margem - 30, yAtual + 35);
+
+    ctx.fillStyle = '#E65100';
+
+    if (valorStr.includes(",")) {
+
+        let valParts = valorStr.split(",");
+        let reais = valParts[0];
+        let cents = "," + valParts[1];
+
+        ctx.font = `bold 14px ${FONTE_PADRAO}`;
+        let centWidth = ctx.measureText(cents).width;
+        ctx.fillText(cents, largura - margem - 30, yAtual + 65);
+
+        ctx.font = `bold 24px ${FONTE_PADRAO}`;
+        ctx.fillText(reais, largura - margem - 30 - centWidth, yAtual + 65);
+
+    } else {
+
+        ctx.font = `bold 24px ${FONTE_PADRAO}`;
+        ctx.fillText(valorStr, largura - margem - 30, yAtual + 65);
+
+    }
+}
             ctx.textAlign = 'left';
 
             yAtual += alturaCartao + espacoEntreCartoes;
@@ -298,13 +671,14 @@ function criarModuloGuanabara() {
                     }
                     alert("A lista de horários é muito grande! A primeira parte foi copiada.\n\nCole no WhatsApp e depois clique no botão novamente para copiar o restante.");
                 } else {
+                    if(dados.limparCredito) limparCreditoCompleto();
                     filaViagensGlobal = [];
                     if(btn) {
                         btn.style.background = "#28a745";
                         btn.innerHTML = `✅ Card Copiado!`;
                         setTimeout(() => {
                             btn.style.background = "#303F9F";
-                            btn.innerHTML = dados.textoVolta || "📸 Copiar Tabela (Imagem)";
+                            btn.innerHTML = dados.textoVolta || "TABELA";
                             btn.style.pointerEvents = 'auto';
                         }, 3000);
                     }
@@ -316,7 +690,7 @@ function criarModuloGuanabara() {
                     btn.innerHTML = "❌ Erro! Tente de novo";
                     btn.style.background = "#dc3545";
                     setTimeout(() => {
-                        btn.innerHTML = dados.textoVolta || "📸 Copiar Tabela (Imagem)";
+                        btn.innerHTML = dados.textoVolta || "TABELA";
                         btn.style.background = "#303F9F";
                         btn.style.pointerEvents = 'auto';
                     }, 4000);
@@ -325,24 +699,30 @@ function criarModuloGuanabara() {
         }, "image/png");
     }
 
-    function processarLotePendente(isPrimeiroLote) {
+   function processarLotePendente(isPrimeiroLote, idBotao = "btn-copy-william") {
         let lote = filaViagensGlobal.splice(0, MAX_ITENS_POR_IMAGEM);
         let temMais = filaViagensGlobal.length > 0;
         let restantes = filaViagensGlobal.length;
 
         desenharECopiarImagemTabela({
+            isRemarcacao: getCreditoSalvo() > 0,
+            credito: getCreditoSalvo(),
             dataTexto: metadadosViagemGlobal.dataTexto,
             trecho: metadadosViagemGlobal.trecho,
             viagens: lote,
             temMaisRestantes: temMais,
             restantesCount: restantes,
             isPrimeiroLote: isPrimeiroLote,
-            textoVolta: "📸 Copiar Tabela (Imagem)"
-        });
+            textoVolta:
+    idBotao === "btn-copy-esgotados"
+        ? "Esgotados"
+        : "TABELA"
+        }, idBotao);
     }
 
-    function extrairDadosTabela() {
+ function extrairDadosTabela(incluirEsgotados = false, idBotao = "btn-copy-william"){
         const btn = document.getElementById('btn-copy-william');
+        const credito = getCreditoSalvo();
         const elementoData = document.querySelector('.service-date-title, #txt-data-ida-retorno, .active .date-value');
         let dataTexto = elementoData ? elementoData.innerText.trim().toUpperCase() : "DATA";
         dataTexto = dataTexto.replace('EM ', '').replace('COPIAR', '').trim();
@@ -350,7 +730,7 @@ function criarModuloGuanabara() {
 
         if (filaViagensGlobal.length > 0 && metadadosViagemGlobal &&
             metadadosViagemGlobal.dataTexto === dataTexto && metadadosViagemGlobal.trecho === trecho) {
-            processarLotePendente(false);
+            processarLotePendente(false, idBotao);
             return;
         }
 
@@ -374,7 +754,10 @@ function criarModuloGuanabara() {
             const poltTxt = linha.querySelector('.service-availability, [class*="availability"]')?.innerText.replace(/[^0-9]/g, '') || "0";
             const polt = parseInt(poltTxt);
 
-            if (polt <= 0) return;
+           const esgotado = polt <= 0;
+
+if (esgotado && !incluirEsgotados)
+    return;
 
             let valorNovo = 0;
             const celulas = linha.querySelectorAll('td, .price-family-container, .service-price-family');
@@ -386,9 +769,31 @@ function criarModuloGuanabara() {
                 }
             }
 
-            if (valorNovo === 0) return;
+            if (valorNovo === 0 && !esgotado)
+    return;
 
-            let displayValor = "A partir de R$ " + valorNovo.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+           let displayValor = "";
+
+if (esgotado) {
+
+    displayValor = "ESGOTADO";
+
+} else if (credito > 0) {
+
+    let dif = valorNovo - credito;
+
+    displayValor = dif <= 0
+        ? "ISENTO"
+        : "Dif. a partir de R$ " +
+          dif.toLocaleString("pt-BR", { minimumFractionDigits: 2 });
+
+} else {
+
+    displayValor =
+        "A partir de R$ " +
+        valorNovo.toLocaleString("pt-BR", { minimumFractionDigits: 2 });
+
+}
 
             let textoLinha = linha.innerText.toUpperCase();
             let isConexao = textoLinha.includes('PARADA') || textoLinha.includes('CONEXÃO') || textoLinha.includes('MULTIPLAS') || servico.includes('MULTIPLAS');
@@ -415,14 +820,22 @@ function criarModuloGuanabara() {
 
         if (viagensFinais.length > 0) {
             filaViagensGlobal = viagensFinais;
-            metadadosViagemGlobal = { dataTexto, trecho };
-            processarLotePendente(true);
+            metadadosViagemGlobal = { credito, dataTexto, trecho };
+            processarLotePendente(true, idBotao);
         } else {
-            alert("Nenhum horário com vaga disponível encontrado.");
+            alert(
+    incluirEsgotados
+        ? "Nenhum horário esgotado encontrado."
+        : "Nenhum horário com vaga disponível encontrado."
+);
         }
     }
-
-    // ---- Lógica do cartão de remarcação ----
+function extrairDadosTabelaEsgotados() {
+    extrairDadosTabela(true, "btn-copy-esgotados");
+}
+    // =========================================================================
+    // LÓGICA DO CARTÃO DE REMARCAÇÃO
+    // =========================================================================
     function espionarTrechosCompletos() {
         try {
             let origem = document.querySelector('#txt-origem')?.value || "";
@@ -483,11 +896,6 @@ function criarModuloGuanabara() {
                     else if (txtTrechoServico.includes('LEITO')) reserva.servico = 'LEITO';
                     else if (txtTrechoServico.includes('EXECUTIVO')) reserva.servico = 'EXECUTIVO';
                     else if (txtTrechoServico.includes('CONVENCIONAL')) reserva.servico = 'CONVENCIONAL';
-                    else if (txtTrechoServico.includes('CAMA')) reserva.servico = 'CAMA';
-                    else if (txtTrechoServico.includes('LEITO PREMIUM')) reserva.servico = 'LEITO PREMIUM';
-                    else if (txtTrechoServico.includes('SEMI LEITO +CONFORTO')) reserva.servico = 'SEMI LEITO +CONFORTO';
-
-
                 }
             }
         } catch (e) {}
@@ -526,7 +934,7 @@ function criarModuloGuanabara() {
     }
 
     function gerarImagemBilhete(reserva) {
-        const btn = document.getElementById('btn-bilhete-william');
+        const btn = document.getElementById('btn-bilhete');
 
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
@@ -623,6 +1031,8 @@ function criarModuloGuanabara() {
                 const item = new ClipboardItem({ "image/png": blob });
                 await navigator.clipboard.write([item]);
 
+                limparCreditoCompleto();
+
                 if(btn) {
                     btn.style.background = "#28a745";
                     btn.innerHTML = `✅ Bilhete Premium Copiado!`;
@@ -697,9 +1107,13 @@ function criarModuloGuanabara() {
         };
     }
 
-    // ---- Loop principal ----
+    // =========================================================================
+    // LOOP PRINCIPAL
+    // =========================================================================
     function gerenciarBotoesETela() {
+        injetarEstiloBotao();
         espionarTrechosCompletos();
+        capturarValorLiquido();
 
         const temHorarios = document.querySelector('.service-col-3') !== null;
 
@@ -708,39 +1122,106 @@ function criarModuloGuanabara() {
 
         let btnTabela = document.getElementById('btn-copy-william');
         if (temHorarios && !isConfirmacaoOuRemarcacao) {
-            if (!btnTabela) {
-                btnTabela = document.createElement('button');
-                btnTabela.id = 'btn-copy-william';
-                btnTabela.innerHTML = '📸 Copiar Tabela (Imagem)';
-                btnTabela.style = "position:fixed; bottom:20px; right:20px; z-index:999999; padding:10px 18px; background:#303F9F; color:white; border:2px solid #fff; border-radius:8px; font-weight:bold; box-shadow:0 3px 10px rgba(0,0,0,0.25); font-size:14px; cursor:grab;";
-                document.body.appendChild(btnTabela);
 
-                adicionarDrag(btnTabela, extrairDadosTabela);
-            }
-            btnTabela.style.display = 'block';
+    if (!btnTabela) {
+        btnTabela = document.createElement("button");
+        btnTabela.id = "btn-copy-william";
+        btnTabela.innerHTML = "TABELA";
+        btnTabela.className = "william-copy-btn";
 
-            const elementoData = document.querySelector('.service-date-title, #txt-data-ida-retorno, .active .date-value');
-            let curDataTexto = elementoData ? elementoData.innerText.trim().toUpperCase().replace('EM ', '').replace('COPIAR', '').trim() : "";
-            let curTrecho = capturarTrecho();
+        adicionarDrag(btnTabela, () => extrairDadosTabela(false));
+    }
+let btnEsgotados = document.getElementById("btn-copy-esgotados");
 
-            if (filaViagensGlobal.length > 0 && metadadosViagemGlobal) {
-                if (metadadosViagemGlobal.dataTexto !== curDataTexto || metadadosViagemGlobal.trecho !== curTrecho) {
-                    filaViagensGlobal = [];
-                    btnTabela.style.background = "#303F9F";
-                    btnTabela.innerHTML = '📸 Copiar Tabela (Imagem)';
-                    btnTabela.style.pointerEvents = 'auto';
-                }
-            }
+if (!btnEsgotados) {
+    btnEsgotados = document.createElement("button");
+    btnEsgotados.id = "btn-copy-esgotados";
+    btnEsgotados.innerHTML = "ESGOTADOS";
+    btnEsgotados.className = "william-copy-btn";
 
-        } else if (btnTabela) {
+    adicionarDrag(btnEsgotados, extrairDadosTabelaEsgotados);
+}
+
+    const footer = encontrarFooterBotoes();
+
+    if (footer) {
+
+        let wrap = document.getElementById("william-copy-buttons-wrap");
+
+        if (!wrap) {
+            wrap = document.createElement("div");
+            wrap.id = "william-copy-buttons-wrap";
+        }
+
+       if (!wrap.contains(btnTabela))
+    wrap.appendChild(btnTabela);
+
+if (!wrap.contains(btnEsgotados))
+    wrap.appendChild(btnEsgotados);
+
+        const btnNovaPesquisa =
+            encontrarBotaoNovaPesquisaDentroFooter(footer);
+
+        const ancora =
+            encontrarFilhoDiretoDoFooter(footer, btnNovaPesquisa);
+
+        if (wrap.parentElement !== footer) {
+
+            if (ancora)
+                footer.insertBefore(wrap, ancora);
+            else
+                footer.appendChild(wrap);
+        }
+
+    } else {
+
+        if (btnTabela.parentElement !== document.body)
+            document.body.appendChild(btnTabela);
+    }
+
+    btnTabela.style.display = "inline-flex";
+
+    const elementoData = document.querySelector(
+        ".service-date-title, #txt-data-ida-retorno, .active .date-value"
+    );
+
+    let curDataTexto = elementoData
+        ? elementoData.innerText
+              .trim()
+              .toUpperCase()
+              .replace("EM ", "")
+              .replace("COPIAR", "")
+              .trim()
+        : "";
+
+    let curTrecho = capturarTrecho();
+
+    if (filaViagensGlobal.length > 0 && metadadosViagemGlobal) {
+
+        if (
+            metadadosViagemGlobal.dataTexto !== curDataTexto ||
+            metadadosViagemGlobal.trecho !== curTrecho
+        ) {
+            filaViagensGlobal = [];
+            btnTabela.style.background = "#303F9F";
+            btnTabela.innerHTML = "TABELA";
+            btnTabela.style.pointerEvents = "auto";
+        }
+    }
+
+} else if (btnTabela) {
+
+    btnTabela.style.display = "none";
+
+}else if (btnTabela) {
             btnTabela.style.display = 'none';
         }
 
-        let btnBilhete = document.getElementById('btn-bilhete-william');
+        let btnBilhete = document.getElementById('btn-bilhete');
         if (isConfirmacaoOuRemarcacao) {
             if (!btnBilhete) {
                 btnBilhete = document.createElement('button');
-                btnBilhete.id = 'btn-bilhete-william';
+                btnBilhete.id = 'btn-bilhete';
                 btnBilhete.innerHTML = '📸 Gerar Prévia de Remarcação';
                 btnBilhete.style = "position:fixed; bottom:80px; right:20px; z-index:999999; padding:10px 18px; background:#303F9F; color:white; border:2px solid #fff; border-radius:8px; font-weight:bold; box-shadow:0 3px 10px rgba(0,0,0,0.25); font-size:14px; cursor:grab;";
                 document.body.appendChild(btnBilhete);
@@ -755,48 +1236,6 @@ function criarModuloGuanabara() {
         }
     }
 
-    return {
-        id: 'guanabara_print_horarios',
-        name: 'SMART BUS - Print dos horarios e remarcacoes',
-        defaultOn: true,
-        fixo: true, // módulo embutido no código-fonte, não pode ser excluído pelo painel
+    setInterval(gerenciarBotoesETela, 1500);
 
-        init() {
-            // este widget só faz sentido no sistema de reservas da Guanabara/SmartBus
-            if (!location.hostname.includes('smarttravelit.com')) return;
-
-            filaViagensGlobal = [];
-            metadadosViagemGlobal = null;
-            linkAtual = window.location.hash;
-
-            intervalHashId = setInterval(() => {
-                if (window.location.hash !== linkAtual) {
-                    linkAtual = window.location.hash;
-                    let rotaBase = linkAtual.split('?')[0];
-                    const rotasRaiz = ['#/', '#/home', '#/dashboard', ''];
-
-                    if (rotasRaiz.includes(rotaBase)) {
-                        filaViagensGlobal = [];
-                    }
-                }
-            }, 1000);
-
-            intervalBotoesId = setInterval(gerenciarBotoesETela, 1500);
-        },
-
-        destroy() {
-            if (intervalHashId) clearInterval(intervalHashId);
-            if (intervalBotoesId) clearInterval(intervalBotoesId);
-            intervalHashId = null;
-            intervalBotoesId = null;
-
-            document.getElementById('btn-copy-william')?.remove();
-            document.getElementById('btn-bilhete-william')?.remove();
-
-            filaViagensGlobal = [];
-            metadadosViagemGlobal = null;
-        }
-    };
-}
-
-registrarModulo(criarModuloGuanabara());
+})();

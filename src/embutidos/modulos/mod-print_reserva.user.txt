@@ -19,7 +19,7 @@ function criarModuloPrintReserva() {
     const COMP_ID = 'tmm-print-reserva-composicao';
     const LARGURA = 1150;          // largura total do print (px)
     const LARG_VALORES = 380;      // largura da coluna de valores (px)
-    const COR_BOTAO = '#8b0000';   // vermelho escuro (mesmo tom do CADASTRAR)
+    const COR_BOTAO = '#3546b5';   // azul
     const ESCALA = 1.25;           // nitidez: 1 = mais rápido, 2 = mais nítido
 
     let observer = null;

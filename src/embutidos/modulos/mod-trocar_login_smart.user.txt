@@ -1,0 +1,1383 @@
+// ==UserScript==
+// @name        Trocar Login
+// @version     1.0
+// @description Painel para entrar/trocar entre logins do Smart, com tela própria para cadastrar, editar e excluir perfis (usuário e senha).
+// @match       *://*.smarttravelit.com/*
+// @grant       none
+// @grupo        SmartBus
+// ==/UserScript==
+
+(function () {
+    'use strict';
+    if (
+        !location.hostname.includes("smarttravelit.com")
+    ) {
+        return;
+    }
+    // ==================================================
+    // LOGINS PADRÃO (usados só na primeira vez, para popular o
+    // cadastro. Depois disso, quem manda é o localStorage — gerencie
+    // pelo botão "⚙️ Gerenciar perfis" dentro do painel.)
+    // ==================================================
+    const LOGINS_PADRAO = [
+        {
+            nome: 'Gilvan',
+            usuario: '230425i',
+            senha: 'guana123'
+        },
+
+        {
+            nome: 'Hellen',
+            usuario: '230425u',
+            senha: 'guana123.'
+        }
+    ];
+
+    // ==================================================
+    // CONFIGURAÇÕES
+    // ==================================================
+    const STORAGE_LOGIN_ESCOLHIDO = 'smartbus_login_escolhido_para_entrar_v401';
+    const STORAGE_COMANDO_SAIR = 'smartbus_sair_todos_comando_v401';
+    const CANAL_SAIR = 'smartbus_sair_todos_v401';
+    const STORAGE_LOGINS = 'smartbus_logins_cadastrados_v1';
+
+    let processandoLogout = false;
+    let processandoLoginAutomatico = false;
+
+    // ==================================================
+    // CADASTRO DE LOGINS (CRUD no localStorage)
+    // ==================================================
+    function gerarIdLogin() {
+        return 'login_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+    }
+
+    function salvarLogins(lista) {
+        try {
+            localStorage.setItem(STORAGE_LOGINS, JSON.stringify(lista));
+        } catch (e) {}
+    }
+
+    function carregarLogins() {
+        try {
+            const bruto = localStorage.getItem(STORAGE_LOGINS);
+            if (bruto) {
+                const lista = JSON.parse(bruto);
+                if (Array.isArray(lista)) return lista;
+            }
+        } catch (e) {}
+
+        // primeira vez usando o painel: popula com os logins padrão
+        const padrao = LOGINS_PADRAO.map(login => ({ ...login, id: gerarIdLogin() }));
+        salvarLogins(padrao);
+        return padrao;
+    }
+
+    function esperar(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function estaNoLogin() {
+        return location.hash.toLowerCase().includes('/login');
+    }
+
+    function texto(el) {
+        return (el?.innerText || el?.textContent || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+    }
+
+    function visivel(el) {
+        if (!el) return false;
+
+        const st = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+
+        return (
+            st.display !== 'none' &&
+            st.visibility !== 'hidden' &&
+            st.opacity !== '0' &&
+            r.width > 0 &&
+            r.height > 0
+        );
+    }
+
+    function clicarReal(el) {
+        if (!el) return false;
+
+        try {
+            el.disabled = false;
+            el.removeAttribute('disabled');
+            el.removeAttribute('aria-disabled');
+        } catch (e) {}
+
+        try {
+            el.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
+        } catch (e) {}
+
+        const eventosMouse = [
+            'mouseover',
+            'mouseenter',
+            'mousemove',
+            'mousedown',
+            'mouseup',
+            'click'
+        ];
+
+        for (const nome of eventosMouse) {
+            try {
+                el.dispatchEvent(new MouseEvent(nome, {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                }));
+            } catch (e) {}
+        }
+
+        try {
+            el.click();
+        } catch (e) {}
+
+        return true;
+    }
+
+    // ==================================================
+    // LOGIN
+    // ==================================================
+    function eventosAngular(input) {
+        const eventos = [
+            'focus',
+            'keydown',
+            'keypress',
+            'keyup',
+            'input',
+            'change',
+            'blur'
+        ];
+
+        eventos.forEach(nome => {
+            try {
+                input.dispatchEvent(new Event(nome, {
+                    bubbles: true,
+                    cancelable: true
+                }));
+            } catch (e) {}
+        });
+
+        try {
+            input.dispatchEvent(new KeyboardEvent('keyup', {
+                bubbles: true,
+                cancelable: true,
+                key: 'a',
+                code: 'KeyA',
+                keyCode: 65,
+                which: 65
+            }));
+        } catch (e) {}
+
+        try {
+            if (window.angular) {
+                const ngEl = window.angular.element(input);
+
+                ngEl.triggerHandler('input');
+                ngEl.triggerHandler('change');
+                ngEl.triggerHandler('blur');
+
+                const scope = ngEl.scope && ngEl.scope();
+
+                if (scope && scope.$applyAsync) {
+                    scope.$applyAsync();
+                } else if (scope && scope.$apply) {
+                    scope.$apply();
+                }
+            }
+        } catch (e) {}
+    }
+
+    function setValor(input, valor) {
+        if (!input) return false;
+
+        input.focus();
+
+        try {
+            input.value = '';
+            eventosAngular(input);
+        } catch (e) {}
+
+        try {
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype,
+                'value'
+            ).set;
+
+            setter.call(input, valor);
+        } catch (e) {
+            input.value = valor;
+        }
+
+        input.setAttribute('value', valor);
+
+        eventosAngular(input);
+
+        return true;
+    }
+
+    function pegarInputsVisiveis() {
+        return Array.from(document.querySelectorAll('input'))
+            .filter(visivel)
+            .sort((a, b) => {
+                const ra = a.getBoundingClientRect();
+                const rb = b.getBoundingClientRect();
+                return ra.top - rb.top;
+            });
+    }
+
+    function pegarCampoUsuario() {
+        const inputs = pegarInputsVisiveis();
+
+        let campo = inputs.find(input => {
+            const type = (input.type || '').toLowerCase();
+            const name = (input.name || '').toLowerCase();
+            const aria = (input.getAttribute('aria-label') || '').toLowerCase();
+            const placeholder = (input.placeholder || '').toLowerCase();
+
+            return (
+                type === 'text' ||
+                type === 'email' ||
+                name.includes('usuario') ||
+                name.includes('usuário') ||
+                name.includes('user') ||
+                aria.includes('usuario') ||
+                aria.includes('usuário') ||
+                aria.includes('user') ||
+                placeholder.includes('usuario') ||
+                placeholder.includes('usuário') ||
+                placeholder.includes('user')
+            );
+        });
+
+        if (campo) return campo;
+
+        return inputs.find(input => {
+            const type = (input.type || '').toLowerCase();
+            return type !== 'password' && type !== 'hidden';
+        }) || null;
+    }
+
+    function pegarCampoSenha() {
+        const inputs = pegarInputsVisiveis();
+
+        let campo = inputs.find(input => {
+            const type = (input.type || '').toLowerCase();
+            return type === 'password';
+        });
+
+        if (campo) return campo;
+
+        return inputs[1] || null;
+    }
+
+    function pegarBotaoEntrar() {
+        const candidatos = Array.from(document.querySelectorAll(
+            'button, a, input[type="submit"], div[role="button"], span[role="button"], .btn, [ng-click], [onclick]'
+        )).filter(visivel);
+
+        let botao = candidatos.find(el => {
+            const t = texto(el);
+            const value = (el.getAttribute('value') || '').toLowerCase();
+
+            return (
+                t === 'entrar' ||
+                t.includes('entrar') ||
+                value.includes('entrar')
+            );
+        });
+
+        if (botao) {
+            return botao.closest('button, a, .btn, [ng-click], [onclick]') || botao;
+        }
+
+        botao = candidatos.find(el => {
+            const r = el.getBoundingClientRect();
+            const t = texto(el);
+
+            return (
+                r.width >= 200 &&
+                r.height >= 35 &&
+                t.length <= 25
+            );
+        });
+
+        return botao || null;
+    }
+
+    function apertarEnter(input) {
+        if (!input) return;
+
+        input.focus();
+
+        ['keydown', 'keypress', 'keyup'].forEach(nome => {
+            try {
+                input.dispatchEvent(new KeyboardEvent(nome, {
+                    bubbles: true,
+                    cancelable: true,
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13
+                }));
+            } catch (e) {}
+        });
+
+        const form = input.closest('form');
+
+        if (form) {
+            try {
+                form.dispatchEvent(new Event('submit', {
+                    bubbles: true,
+                    cancelable: true
+                }));
+            } catch (e) {}
+        }
+    }
+
+    async function preencherELogar(login) {
+        if (!estaNoLogin()) return;
+
+        const campoUsuario = pegarCampoUsuario();
+        const campoSenha = pegarCampoSenha();
+
+        if (!campoUsuario || !campoSenha) {
+            alert('Não encontrei os campos de usuário e senha.');
+            return;
+        }
+
+        const painelLogin = document.getElementById('tm-smart-login-painel');
+
+        if (painelLogin) {
+            painelLogin.style.opacity = '0.7';
+            painelLogin.style.pointerEvents = 'none';
+        }
+
+        setValor(campoUsuario, login.usuario);
+        await esperar(300);
+
+        setValor(campoSenha, login.senha);
+        await esperar(300);
+
+        setValor(campoUsuario, login.usuario);
+        await esperar(200);
+
+        setValor(campoSenha, login.senha);
+        await esperar(700);
+
+        const botaoEntrar = pegarBotaoEntrar();
+
+        if (botaoEntrar) {
+            clicarReal(botaoEntrar);
+        } else {
+            apertarEnter(campoSenha);
+        }
+
+        setTimeout(() => {
+            if (estaNoLogin()) {
+                const botao2 = pegarBotaoEntrar();
+                const senha2 = pegarCampoSenha();
+
+                if (botao2) {
+                    clicarReal(botao2);
+                } else {
+                    apertarEnter(senha2);
+                }
+            }
+        }, 1500);
+
+        setTimeout(() => {
+            try {
+                sessionStorage.removeItem(STORAGE_LOGIN_ESCOLHIDO);
+                localStorage.removeItem(STORAGE_LOGIN_ESCOLHIDO);
+            } catch (e) {}
+        }, 4000);
+    }
+
+    function salvarLoginEscolhido(login) {
+        const dados = {
+            nome: login.nome,
+            usuario: login.usuario,
+            senha: login.senha,
+            criadoEm: Date.now()
+        };
+
+        try {
+            sessionStorage.setItem(STORAGE_LOGIN_ESCOLHIDO, JSON.stringify(dados));
+            localStorage.setItem(STORAGE_LOGIN_ESCOLHIDO, JSON.stringify(dados));
+        } catch (e) {}
+    }
+
+    function pegarLoginEscolhidoPendente() {
+        let bruto = null;
+
+        try {
+            bruto = sessionStorage.getItem(STORAGE_LOGIN_ESCOLHIDO);
+        } catch (e) {}
+
+        if (!bruto) {
+            try {
+                bruto = localStorage.getItem(STORAGE_LOGIN_ESCOLHIDO);
+            } catch (e) {}
+        }
+
+        if (!bruto) return null;
+
+        try {
+            const login = JSON.parse(bruto);
+            const idade = Date.now() - Number(login.criadoEm || 0);
+
+            if (idade > 60000) {
+                sessionStorage.removeItem(STORAGE_LOGIN_ESCOLHIDO);
+                localStorage.removeItem(STORAGE_LOGIN_ESCOLHIDO);
+                return null;
+            }
+
+            return login;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async function tentarLoginPendente() {
+        if (processandoLoginAutomatico) return;
+        if (!estaNoLogin()) return;
+
+        const login = pegarLoginEscolhidoPendente();
+
+        if (!login) return;
+
+        processandoLoginAutomatico = true;
+
+        await esperar(800);
+        await preencherELogar(login);
+
+        processandoLoginAutomatico = false;
+    }
+
+    // ==================================================
+    // PAINEL DE LOGIN NA TELA /LOGIN
+    // ==================================================
+    function removerPainelLogin() {
+        const painel = document.getElementById('tm-smart-login-painel');
+        if (painel) painel.remove();
+    }
+
+    function criarPainelLogin() {
+        if (!estaNoLogin()) {
+            removerPainelLogin();
+            return;
+        }
+
+        if (document.getElementById('tm-smart-login-painel')) return;
+
+        const painel = document.createElement('div');
+        painel.id = 'tm-smart-login-painel';
+
+        painel.style.position = 'fixed';
+        painel.style.right = '35px';
+        painel.style.bottom = '35px';
+        painel.style.zIndex = '999999';
+        painel.style.width = '250px';
+        painel.style.background = '#ffffff';
+        painel.style.border = '1px solid #d1d5db';
+        painel.style.borderRadius = '12px';
+        painel.style.boxShadow = '0 8px 24px rgba(0,0,0,.25)';
+        painel.style.fontFamily = 'Arial, sans-serif';
+        painel.style.overflow = 'hidden';
+
+        const titulo = document.createElement('div');
+        titulo.textContent = 'Entrar no Smart';
+        titulo.style.background = '#303f9f';
+        titulo.style.color = '#fff';
+        titulo.style.padding = '11px 12px';
+        titulo.style.fontSize = '14px';
+        titulo.style.fontWeight = '700';
+
+        const corpo = criarListaLogins(false);
+
+        painel.appendChild(titulo);
+        painel.appendChild(corpo);
+
+        document.body.appendChild(painel);
+    }
+
+    // ==================================================
+    // LISTA DE LOGINS / MODAL
+    // ==================================================
+    function criarListaLogins(modoTrocar) {
+        const corpo = document.createElement('div');
+        corpo.dataset.tmCorpoLogins = modoTrocar ? 'trocar' : 'painel';
+        corpo.style.padding = '10px';
+        corpo.style.display = 'flex';
+        corpo.style.flexDirection = 'column';
+        corpo.style.gap = '8px';
+        corpo.style.maxHeight = '340px';
+        corpo.style.overflowY = 'auto';
+
+        const logins = carregarLogins();
+
+        if (!logins.length) {
+            const vazio = document.createElement('div');
+            vazio.textContent = 'Nenhum login cadastrado ainda. Use "Gerenciar perfis" abaixo.';
+            vazio.style.fontSize = '12px';
+            vazio.style.color = '#6b7280';
+            vazio.style.padding = '4px 2px';
+            corpo.appendChild(vazio);
+        }
+
+        logins.forEach((login, index) => {
+            const btn = document.createElement('button');
+
+            btn.textContent = `${index + 1}. ${login.nome}`;
+            btn.title = login.usuario;
+
+            btn.style.width = '100%';
+            btn.style.border = 'none';
+            btn.style.borderRadius = '8px';
+            btn.style.background = '#eef2ff';
+            btn.style.color = '#1e1b4b';
+            btn.style.padding = '10px';
+            btn.style.fontSize = '13px';
+            btn.style.fontWeight = '700';
+            btn.style.cursor = 'pointer';
+            btn.style.textAlign = 'left';
+
+            btn.addEventListener('mouseenter', () => {
+                btn.style.background = '#c7d2fe';
+            });
+
+            btn.addEventListener('mouseleave', () => {
+                btn.style.background = '#eef2ff';
+            });
+
+            btn.addEventListener('click', () => {
+                if (modoTrocar) {
+                    salvarLoginEscolhido(login);
+                    removerModalTrocarLogin();
+                    enviarComandoSairTodos();
+                } else {
+                    preencherELogar(login);
+                }
+            });
+
+            corpo.appendChild(btn);
+        });
+
+        const aviso = document.createElement('div');
+
+        aviso.textContent = modoTrocar
+            ? 'Escolha um login. O Smart vai sair e entrar com ele.'
+            : 'Clique em um login para preencher e entrar.';
+
+        aviso.style.fontSize = '11px';
+        aviso.style.color = '#6b7280';
+        aviso.style.padding = '0 2px 2px';
+
+        corpo.appendChild(aviso);
+
+        const btnGerenciar = document.createElement('button');
+        btnGerenciar.type = 'button';
+        btnGerenciar.textContent = '⚙️ Gerenciar perfis';
+        btnGerenciar.style.width = '100%';
+        btnGerenciar.style.marginTop = '2px';
+        btnGerenciar.style.border = '1px dashed #c7d2fe';
+        btnGerenciar.style.borderRadius = '8px';
+        btnGerenciar.style.background = 'transparent';
+        btnGerenciar.style.color = '#3546b5';
+        btnGerenciar.style.padding = '8px';
+        btnGerenciar.style.fontSize = '12px';
+        btnGerenciar.style.fontWeight = '700';
+        btnGerenciar.style.cursor = 'pointer';
+
+        btnGerenciar.addEventListener('mouseenter', () => {
+            btnGerenciar.style.background = '#eef2ff';
+        });
+
+        btnGerenciar.addEventListener('mouseleave', () => {
+            btnGerenciar.style.background = 'transparent';
+        });
+
+        btnGerenciar.addEventListener('click', () => abrirModalGerenciarLogins());
+
+        corpo.appendChild(btnGerenciar);
+
+        return corpo;
+    }
+
+    function atualizarListasAbertas() {
+        const corpoPainel = document.querySelector('#tm-smart-login-painel [data-tm-corpo-logins]');
+        if (corpoPainel) corpoPainel.replaceWith(criarListaLogins(false));
+
+        const corpoModal = document.querySelector('#tm-smart-modal-trocar-login [data-tm-corpo-logins]');
+        if (corpoModal) corpoModal.replaceWith(criarListaLogins(true));
+    }
+
+    // ==================================================
+    // GERENCIAR PERFIS (cadastrar / editar / excluir)
+    // ==================================================
+    function removerModalGerenciarLogins() {
+        const modal = document.getElementById('tm-smart-modal-gerenciar-logins');
+        if (modal) modal.remove();
+    }
+
+    function abrirModalGerenciarLogins() {
+        removerModalGerenciarLogins();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'tm-smart-modal-gerenciar-logins';
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000001';
+        overlay.style.background = 'rgba(0,0,0,.35)';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.fontFamily = 'Arial, sans-serif';
+
+        const modal = document.createElement('div');
+        modal.style.width = '340px';
+        modal.style.maxWidth = 'calc(100vw - 30px)';
+        modal.style.background = '#fff';
+        modal.style.borderRadius = '14px';
+        modal.style.boxShadow = '0 12px 32px rgba(0,0,0,.35)';
+        modal.style.overflow = 'hidden';
+
+        const header = document.createElement('div');
+        header.style.background = '#303f9f';
+        header.style.color = '#fff';
+        header.style.padding = '12px 14px';
+        header.style.fontWeight = '700';
+        header.style.fontSize = '15px';
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+
+        const titulo = document.createElement('span');
+        titulo.textContent = 'Gerenciar perfis';
+
+        function fecharGerenciar() {
+            removerModalGerenciarLogins();
+            atualizarListasAbertas();
+        }
+
+        const fechar = document.createElement('button');
+        fechar.textContent = '×';
+        fechar.style.border = 'none';
+        fechar.style.background = 'transparent';
+        fechar.style.color = '#fff';
+        fechar.style.fontSize = '22px';
+        fechar.style.cursor = 'pointer';
+        fechar.style.lineHeight = '1';
+        fechar.addEventListener('click', fecharGerenciar);
+
+        header.appendChild(titulo);
+        header.appendChild(fechar);
+
+        const corpo = document.createElement('div');
+        corpo.style.padding = '10px';
+        corpo.style.display = 'flex';
+        corpo.style.flexDirection = 'column';
+        corpo.style.gap = '8px';
+        corpo.style.maxHeight = '360px';
+        corpo.style.overflowY = 'auto';
+
+        function render() {
+            corpo.innerHTML = '';
+            const logins = carregarLogins();
+
+            if (!logins.length) {
+                const vazio = document.createElement('div');
+                vazio.textContent = 'Nenhum login cadastrado ainda.';
+                vazio.style.fontSize = '12px';
+                vazio.style.color = '#6b7280';
+                vazio.style.padding = '4px 2px';
+                corpo.appendChild(vazio);
+            }
+
+            logins.forEach(login => {
+                const linha = document.createElement('div');
+                linha.style.display = 'flex';
+                linha.style.alignItems = 'center';
+                linha.style.justifyContent = 'space-between';
+                linha.style.gap = '8px';
+                linha.style.background = '#f8fafc';
+                linha.style.border = '1px solid #e5e7eb';
+                linha.style.borderRadius = '8px';
+                linha.style.padding = '8px 10px';
+
+                const info = document.createElement('div');
+                info.style.minWidth = '0';
+                info.style.overflow = 'hidden';
+
+                const nomeEl = document.createElement('div');
+                nomeEl.textContent = login.nome || '(sem nome)';
+                nomeEl.style.fontSize = '13px';
+                nomeEl.style.fontWeight = '700';
+                nomeEl.style.color = '#1e1b4b';
+                nomeEl.style.whiteSpace = 'nowrap';
+                nomeEl.style.overflow = 'hidden';
+                nomeEl.style.textOverflow = 'ellipsis';
+
+                const userEl = document.createElement('div');
+                userEl.textContent = login.usuario || '';
+                userEl.style.fontSize = '11px';
+                userEl.style.color = '#6b7280';
+
+                info.appendChild(nomeEl);
+                info.appendChild(userEl);
+
+                const acoes = document.createElement('div');
+                acoes.style.display = 'flex';
+                acoes.style.gap = '2px';
+                acoes.style.flexShrink = '0';
+
+                const editar = document.createElement('button');
+                editar.type = 'button';
+                editar.textContent = '✏️';
+                editar.title = 'Editar';
+                editar.style.border = 'none';
+                editar.style.background = 'transparent';
+                editar.style.cursor = 'pointer';
+                editar.style.fontSize = '15px';
+                editar.style.padding = '4px 6px';
+                editar.addEventListener('click', () => abrirModalFormLogin(login, render));
+
+                const excluir = document.createElement('button');
+                excluir.type = 'button';
+                excluir.textContent = '🗑️';
+                excluir.title = 'Excluir';
+                excluir.style.border = 'none';
+                excluir.style.background = 'transparent';
+                excluir.style.cursor = 'pointer';
+                excluir.style.fontSize = '15px';
+                excluir.style.padding = '4px 6px';
+                excluir.addEventListener('click', () => {
+                    if (!confirm(`Excluir o login "${login.nome}"?`)) return;
+                    salvarLogins(carregarLogins().filter(l => l.id !== login.id));
+                    render();
+                    atualizarListasAbertas();
+                });
+
+                acoes.appendChild(editar);
+                acoes.appendChild(excluir);
+
+                linha.appendChild(info);
+                linha.appendChild(acoes);
+                corpo.appendChild(linha);
+            });
+        }
+
+        render();
+
+        const rodape = document.createElement('div');
+        rodape.style.padding = '10px';
+        rodape.style.borderTop = '1px solid #eef2ff';
+
+        const btnAdicionar = document.createElement('button');
+        btnAdicionar.type = 'button';
+        btnAdicionar.textContent = '+ Adicionar login';
+        btnAdicionar.style.width = '100%';
+        btnAdicionar.style.border = 'none';
+        btnAdicionar.style.borderRadius = '8px';
+        btnAdicionar.style.background = '#3546b5';
+        btnAdicionar.style.color = '#fff';
+        btnAdicionar.style.padding = '10px';
+        btnAdicionar.style.fontSize = '13px';
+        btnAdicionar.style.fontWeight = '700';
+        btnAdicionar.style.cursor = 'pointer';
+        btnAdicionar.addEventListener('click', () => abrirModalFormLogin(null, render));
+
+        rodape.appendChild(btnAdicionar);
+
+        modal.appendChild(header);
+        modal.appendChild(corpo);
+        modal.appendChild(rodape);
+        overlay.appendChild(modal);
+
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) fecharGerenciar();
+        });
+
+        document.body.appendChild(overlay);
+    }
+
+    function removerModalFormLogin() {
+        const modal = document.getElementById('tm-smart-modal-form-login');
+        if (modal) modal.remove();
+    }
+
+    function abrirModalFormLogin(loginExistente, aoSalvar) {
+        removerModalFormLogin();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'tm-smart-modal-form-login';
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000002';
+        overlay.style.background = 'rgba(0,0,0,.45)';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.fontFamily = 'Arial, sans-serif';
+
+        const modal = document.createElement('div');
+        modal.style.width = '300px';
+        modal.style.maxWidth = 'calc(100vw - 30px)';
+        modal.style.background = '#fff';
+        modal.style.borderRadius = '14px';
+        modal.style.boxShadow = '0 12px 32px rgba(0,0,0,.35)';
+        modal.style.padding = '16px';
+        modal.style.boxSizing = 'border-box';
+
+        const titulo = document.createElement('div');
+        titulo.textContent = loginExistente ? 'Editar login' : 'Novo login';
+        titulo.style.fontWeight = '700';
+        titulo.style.fontSize = '15px';
+        titulo.style.color = '#1e1b4b';
+        titulo.style.marginBottom = '12px';
+
+        function criarCampo(labelTexto, valorInicial) {
+            const wrap = document.createElement('div');
+            wrap.style.marginBottom = '10px';
+
+            const label = document.createElement('label');
+            label.textContent = labelTexto;
+            label.style.display = 'block';
+            label.style.fontSize = '11px';
+            label.style.fontWeight = '700';
+            label.style.color = '#6b7280';
+            label.style.marginBottom = '4px';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.autocomplete = 'off';
+            input.value = valorInicial || '';
+            input.style.width = '100%';
+            input.style.boxSizing = 'border-box';
+            input.style.padding = '8px 10px';
+            input.style.border = '1px solid #d1d5db';
+            input.style.borderRadius = '8px';
+            input.style.fontSize = '13px';
+
+            wrap.appendChild(label);
+            wrap.appendChild(input);
+
+            return { wrap, input };
+        }
+
+        const campoNome = criarCampo('Nome (ex: Gilvan)', loginExistente?.nome);
+        const campoUsuario = criarCampo('Usuário', loginExistente?.usuario);
+        const campoSenha = criarCampo('Senha', loginExistente?.senha);
+
+        const erro = document.createElement('div');
+        erro.style.color = '#dc2626';
+        erro.style.fontSize = '11px';
+        erro.style.marginBottom = '8px';
+        erro.style.display = 'none';
+
+        const botoes = document.createElement('div');
+        botoes.style.display = 'flex';
+        botoes.style.gap = '8px';
+        botoes.style.marginTop = '4px';
+
+        const cancelar = document.createElement('button');
+        cancelar.type = 'button';
+        cancelar.textContent = 'Cancelar';
+        cancelar.style.flex = '1';
+        cancelar.style.border = '1px solid #d1d5db';
+        cancelar.style.borderRadius = '8px';
+        cancelar.style.background = '#fff';
+        cancelar.style.color = '#374151';
+        cancelar.style.padding = '9px';
+        cancelar.style.fontSize = '13px';
+        cancelar.style.fontWeight = '700';
+        cancelar.style.cursor = 'pointer';
+        cancelar.addEventListener('click', () => removerModalFormLogin());
+
+        const salvar = document.createElement('button');
+        salvar.type = 'button';
+        salvar.textContent = 'Salvar';
+        salvar.style.flex = '1';
+        salvar.style.border = 'none';
+        salvar.style.borderRadius = '8px';
+        salvar.style.background = '#3546b5';
+        salvar.style.color = '#fff';
+        salvar.style.padding = '9px';
+        salvar.style.fontSize = '13px';
+        salvar.style.fontWeight = '700';
+        salvar.style.cursor = 'pointer';
+
+        salvar.addEventListener('click', () => {
+            const nome = campoNome.input.value.trim();
+            const usuario = campoUsuario.input.value.trim();
+            const senha = campoSenha.input.value;
+
+            if (!nome || !usuario || !senha) {
+                erro.textContent = 'Preencha nome, usuário e senha.';
+                erro.style.display = 'block';
+                return;
+            }
+
+            const lista = carregarLogins();
+
+            if (loginExistente) {
+                const indice = lista.findIndex(l => l.id === loginExistente.id);
+                if (indice >= 0) lista[indice] = { ...lista[indice], nome, usuario, senha };
+            } else {
+                lista.push({ id: gerarIdLogin(), nome, usuario, senha });
+            }
+
+            salvarLogins(lista);
+            removerModalFormLogin();
+            if (aoSalvar) aoSalvar();
+            atualizarListasAbertas();
+        });
+
+        botoes.appendChild(cancelar);
+        botoes.appendChild(salvar);
+
+        modal.appendChild(titulo);
+        modal.appendChild(campoNome.wrap);
+        modal.appendChild(campoUsuario.wrap);
+        modal.appendChild(campoSenha.wrap);
+        modal.appendChild(erro);
+        modal.appendChild(botoes);
+        overlay.appendChild(modal);
+
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) removerModalFormLogin();
+        });
+
+        document.body.appendChild(overlay);
+
+        campoNome.input.focus();
+    }
+
+    function removerModalTrocarLogin() {
+        const modal = document.getElementById('tm-smart-modal-trocar-login');
+        if (modal) modal.remove();
+    }
+
+    function abrirModalTrocarLogin() {
+        removerModalTrocarLogin();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'tm-smart-modal-trocar-login';
+
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000000';
+        overlay.style.background = 'rgba(0,0,0,.35)';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.fontFamily = 'Arial, sans-serif';
+
+        const modal = document.createElement('div');
+        modal.style.width = '320px';
+        modal.style.maxWidth = 'calc(100vw - 30px)';
+        modal.style.background = '#fff';
+        modal.style.borderRadius = '14px';
+        modal.style.boxShadow = '0 12px 32px rgba(0,0,0,.35)';
+        modal.style.overflow = 'hidden';
+
+        const header = document.createElement('div');
+        header.style.background = '#303f9f';
+        header.style.color = '#fff';
+        header.style.padding = '12px 14px';
+        header.style.fontWeight = '700';
+        header.style.fontSize = '15px';
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+
+        const titulo = document.createElement('span');
+        titulo.textContent = 'Trocar login do Smart';
+
+        const fechar = document.createElement('button');
+        fechar.textContent = '×';
+        fechar.style.border = 'none';
+        fechar.style.background = 'transparent';
+        fechar.style.color = '#fff';
+        fechar.style.fontSize = '22px';
+        fechar.style.cursor = 'pointer';
+        fechar.style.lineHeight = '1';
+
+        fechar.addEventListener('click', removerModalTrocarLogin);
+
+        header.appendChild(titulo);
+        header.appendChild(fechar);
+
+        const corpo = criarListaLogins(true);
+
+        modal.appendChild(header);
+        modal.appendChild(corpo);
+        overlay.appendChild(modal);
+
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) removerModalTrocarLogin();
+        });
+
+        document.body.appendChild(overlay);
+    }
+
+    // ==================================================
+    // SAIR DO SMART
+    // ==================================================
+    function buscarElementoPorTexto(textos) {
+        const elementos = Array.from(document.querySelectorAll(`
+            button,
+            a,
+            li,
+            span,
+            div,
+            [role="button"],
+            .dropdown-item,
+            .mat-menu-item,
+            .menu-item,
+            .nav-link,
+            [ng-click],
+            [onclick]
+        `));
+
+        return elementos.find(el => {
+            if (!visivel(el)) return false;
+
+            const txt = texto(el);
+
+            return textos.some(t => {
+                const alvo = t.toLowerCase();
+                return txt === alvo || txt.includes(alvo);
+            });
+        }) || null;
+    }
+
+    function buscarMenuUsuario() {
+        const seletores = [
+            '.user-menu',
+            '.profile',
+            '.profile-menu',
+            '.dropdown-toggle',
+            '.navbar-user',
+            '.user-info',
+            '.avatar',
+            '.fa-user',
+            '.fa-user-circle',
+            '[class*="user"]',
+            '[class*="profile"]',
+            '[class*="avatar"]',
+            '[class*="account"]',
+            '[class*="usuario"]',
+            '[class*="usuário"]'
+        ];
+
+        for (const seletor of seletores) {
+            const el = document.querySelector(seletor);
+
+            if (el && visivel(el)) {
+                return el.closest('button, a, div, span, li, [role="button"]') || el;
+            }
+        }
+
+        const textosMenu = [
+            'minha conta',
+            'perfil',
+            'usuário',
+            'usuario',
+            'conta',
+            'admin',
+            'operador'
+        ];
+
+        return buscarElementoPorTexto(textosMenu);
+    }
+
+    async function tentarSairPeloSistema() {
+        const textosSair = [
+            'sair',
+            'logout',
+            'log out',
+            'encerrar sessão',
+            'encerrar sessao',
+            'finalizar sessão',
+            'finalizar sessao',
+            'desconectar'
+        ];
+
+        let botaoSair = buscarElementoPorTexto(textosSair);
+
+        if (botaoSair) {
+            clicarReal(botaoSair);
+            return true;
+        }
+
+        const menu = buscarMenuUsuario();
+
+        if (menu) {
+            clicarReal(menu);
+            await esperar(800);
+
+            botaoSair = buscarElementoPorTexto(textosSair);
+
+            if (botaoSair) {
+                clicarReal(botaoSair);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function limparCookiesAcessiveis() {
+        try {
+            const cookies = document.cookie.split(';');
+
+            for (const cookie of cookies) {
+                const nome = cookie.split('=')[0].trim();
+
+                document.cookie = `${nome}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+                document.cookie = `${nome}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=.smarttravelit.com`;
+                document.cookie = `${nome}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=prod-guanabara-frontoffice-smartbus.smarttravelit.com`;
+            }
+        } catch (e) {}
+    }
+
+    function limparDadosSmartMantendoLoginEscolhido() {
+        let loginEscolhido = null;
+        let comandoSair = null;
+
+        try {
+            loginEscolhido = localStorage.getItem(STORAGE_LOGIN_ESCOLHIDO);
+            comandoSair = localStorage.getItem(STORAGE_COMANDO_SAIR);
+        } catch (e) {}
+
+        try {
+            sessionStorage.clear();
+        } catch (e) {}
+
+        try {
+            localStorage.clear();
+        } catch (e) {}
+
+        try {
+            if (loginEscolhido) {
+                sessionStorage.setItem(STORAGE_LOGIN_ESCOLHIDO, loginEscolhido);
+                localStorage.setItem(STORAGE_LOGIN_ESCOLHIDO, loginEscolhido);
+            }
+
+            if (comandoSair) {
+                localStorage.setItem(STORAGE_COMANDO_SAIR, comandoSair);
+            }
+        } catch (e) {}
+
+        limparCookiesAcessiveis();
+    }
+
+    function irParaLogin() {
+        try {
+            location.href = `${location.origin}/#/login`;
+        } catch (e) {
+            location.href = location.origin;
+        }
+    }
+
+    async function sairDestaAba(motivo = 'manual') {
+        if (processandoLogout) return;
+
+        processandoLogout = true;
+
+        atualizarBotaoTopo('TROCANDO...');
+
+        if (estaNoLogin()) {
+            limparDadosSmartMantendoLoginEscolhido();
+            removerBotaoTopo();
+            processandoLogout = false;
+            return;
+        }
+
+        await tentarSairPeloSistema();
+
+        await esperar(1200);
+
+        limparDadosSmartMantendoLoginEscolhido();
+
+        await esperar(300);
+
+        irParaLogin();
+
+        setTimeout(() => {
+            processandoLogout = false;
+        }, 2500);
+    }
+
+    function enviarComandoSairTodos() {
+        const comando = {
+            tipo: 'SAIR_TODOS_SMARTS',
+            id: String(Date.now()) + '_' + Math.random().toString(16).slice(2),
+            criadoEm: Date.now()
+        };
+
+        try {
+            localStorage.setItem(STORAGE_COMANDO_SAIR, JSON.stringify(comando));
+        } catch (e) {}
+
+        try {
+            if ('BroadcastChannel' in window) {
+                const canal = new BroadcastChannel(CANAL_SAIR);
+                canal.postMessage(comando);
+                canal.close();
+            }
+        } catch (e) {}
+
+        sairDestaAba('trocar_login');
+    }
+
+    function receberComandoSair(comando) {
+        if (!comando || comando.tipo !== 'SAIR_TODOS_SMARTS') return;
+
+        const idade = Date.now() - Number(comando.criadoEm || 0);
+
+        if (idade > 30000) return;
+
+        sairDestaAba('comando_recebido');
+    }
+
+    function iniciarEscutaSair() {
+        window.addEventListener('storage', event => {
+            if (event.key !== STORAGE_COMANDO_SAIR) return;
+
+            try {
+                const comando = JSON.parse(event.newValue || '{}');
+                receberComandoSair(comando);
+            } catch (e) {}
+        });
+
+        try {
+            if ('BroadcastChannel' in window) {
+                const canal = new BroadcastChannel(CANAL_SAIR);
+
+                canal.onmessage = event => {
+                    receberComandoSair(event.data);
+                };
+            }
+        } catch (e) {}
+    }
+
+    // ==================================================
+    // BOTÃO FIXO NO TOPO
+    // ==================================================
+    function atualizarBotaoTopo(txt) {
+        const btn = document.getElementById('tm-smart-botao-topo');
+        if (btn) btn.textContent = txt;
+    }
+
+    function removerBotaoTopo() {
+        const btn = document.getElementById('tm-smart-botao-topo');
+        if (btn) btn.remove();
+    }
+
+  function criarBotaoTopo() {
+    if (estaNoLogin()) {
+        removerBotaoTopo();
+        return;
+    }
+
+    if (document.getElementById('tm-smart-botao-topo')) return;
+
+    // procura a caixa branca superior
+    const headerArea = document.querySelector('.header-menu-areas');
+
+    if (!headerArea) return;
+
+    // garante referência de posicionamento
+    if (getComputedStyle(headerArea).position === 'static') {
+        headerArea.style.position = 'relative';
+    }
+
+    const btn = document.createElement('button');
+    btn.id = 'tm-smart-botao-topo';
+    btn.textContent = 'TROCAR LOGIN';
+    btn.type = 'button';
+
+    // agora fica preso DENTRO da caixa
+    btn.style.position = 'absolute';
+    btn.style.top = '50%';
+    btn.style.right = '15px';
+    btn.style.transform = 'translateY(-50%)';
+
+    btn.style.zIndex = '999999';
+    btn.style.background = '#3546b5';
+    btn.style.color = '#fff';
+    btn.style.border = 'none';
+    btn.style.borderRadius = '6px';
+    btn.style.padding = '0 14px';
+    btn.style.fontSize = '13px';
+    btn.style.fontWeight = '600';
+    btn.style.cursor = 'pointer';
+    btn.style.boxShadow = 'none';
+    btn.style.fontFamily = 'Arial, sans-serif';
+    btn.style.height = '36px';
+    btn.style.lineHeight = '34px';
+    btn.style.border = '1px solid #3546b5';
+    btn.style.whiteSpace = 'nowrap';
+    btn.style.userSelect = 'none';
+
+    btn.addEventListener('mouseenter', () => {
+        btn.style.background = '#29388e';
+    });
+
+    btn.addEventListener('mouseleave', () => {
+        btn.style.background = '#3546b5';
+    });
+
+    btn.addEventListener('click', abrirModalTrocarLogin);
+
+    // adiciona dentro da faixa branca
+    headerArea.appendChild(btn);
+}
+
+    // ==================================================
+    // CONTROLE DE TELA
+    // ==================================================
+    function verificarTela() {
+        if (estaNoLogin()) {
+            removerBotaoTopo();
+            criarPainelLogin();
+            tentarLoginPendente();
+        } else {
+            removerPainelLogin();
+            criarBotaoTopo();
+        }
+    }
+
+    function iniciar() {
+        iniciarEscutaSair();
+
+        setTimeout(verificarTela, 500);
+        setTimeout(verificarTela, 1500);
+        setTimeout(verificarTela, 3000);
+        setTimeout(verificarTela, 5000);
+
+        const observer = new MutationObserver(verificarTela);
+
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+
+        window.addEventListener('hashchange', verificarTela);
+    }
+
+    iniciar();
+
+})();

@@ -1,0 +1,194 @@
+// ==UserScript==
+// @name        Clique para Copiar
+// @version     1.0
+// @description Permite copiar dados da reserva (cupom, telefone, valores, documentos) clicando no texto.
+// @match       *://*.smarttravelit.com/*
+// @grant       none
+// @grupo        SmartBus
+// ==/UserScript==
+
+(function () {
+'use strict';
+
+  if (!location.hostname.includes("smarttravelit.com")) {
+    return;
+  }
+
+  /* =========================================================
+     CONFIG (chave própria: clickCopy)
+  ========================================================= */
+  const CONFIG_KEY = 'smartbus_unificado_config_v6';
+
+  function isEnabled() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}');
+      if (!('clickCopy' in saved)) return true;
+      return !!saved.clickCopy;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /* =========================================================
+     COPIAR COM CLIQUE
+  ========================================================= */
+  function isReservaTitle() {
+    return document.querySelector('.page-title')?.textContent?.trim() === 'Reserva';
+  }
+
+  function normalizarDocumento(texto) {
+    return texto.includes('-') ? texto.split('-').slice(1).join('-').trim() : texto.trim();
+  }
+
+  function ehBadgeTarifaOuStatus(el) {
+    const texto = el.textContent?.trim();
+    if (!texto) return false;
+    if (texto === 'NORMAL' || texto === 'Cancelado') return true;
+    if (el.closest('.badge, .label')) return true;
+    return false;
+  }
+
+  function activateClickCopyStyle(el) {
+    if (!el.dataset.sbCopyOriginalBorder) el.dataset.sbCopyOriginalBorder = el.style.border || '';
+    if (!el.dataset.sbCopyOriginalPadding) el.dataset.sbCopyOriginalPadding = el.style.padding || '';
+    if (!el.dataset.sbCopyOriginalRadius) el.dataset.sbCopyOriginalRadius = el.style.borderRadius || '';
+    if (!el.dataset.sbCopyOriginalCursor) el.dataset.sbCopyOriginalCursor = el.style.cursor || '';
+    if (!el.dataset.sbCopyOriginalTitle) el.dataset.sbCopyOriginalTitle = el.getAttribute('title') || '';
+
+    el.style.border = '1px dashed gray';
+    el.style.padding = '3px 8px';
+    el.style.borderRadius = '6px';
+    el.style.cursor = 'pointer';
+    el.title = 'Clique para copiar';
+    el.dataset.sbCopyStyled = '1';
+  }
+
+  function deactivateClickCopyStyles() {
+    document.querySelectorAll('[data-sb-copy-bound="1"]').forEach(el => {
+      el.style.border = el.dataset.sbCopyOriginalBorder || '';
+      el.style.padding = el.dataset.sbCopyOriginalPadding || '';
+      el.style.borderRadius = el.dataset.sbCopyOriginalRadius || '';
+      el.style.cursor = el.dataset.sbCopyOriginalCursor || '';
+
+      const oldTitle = el.dataset.sbCopyOriginalTitle || '';
+      if (oldTitle) el.setAttribute('title', oldTitle);
+      else el.removeAttribute('title');
+    });
+  }
+
+  function aplicarCliqueCopiar(el, tipo = 'normal') {
+    if (!el) return;
+    if (ehBadgeTarifaOuStatus(el)) return;
+
+    if (isEnabled()) {
+      activateClickCopyStyle(el);
+    }
+
+    if (el.dataset.sbCopyBound === '1') return;
+    el.dataset.sbCopyBound = '1';
+
+    el.addEventListener('click', (e) => {
+      if (!isEnabled()) return;
+      if (ehBadgeTarifaOuStatus(el)) return;
+
+      e.stopPropagation();
+
+      let texto = el.textContent?.trim() || '';
+      if (!texto) return;
+
+      if (tipo === 'documento') texto = normalizarDocumento(texto);
+      navigator.clipboard.writeText(texto);
+
+      el.style.borderColor = 'green';
+      el.style.backgroundColor = '#e6f4ea';
+
+      setTimeout(() => {
+        if (!isEnabled()) return;
+        el.style.borderColor = 'darkred';
+        el.style.backgroundColor = 'transparent';
+      }, 1200);
+    });
+  }
+
+  function aplicarClickCopy() {
+    if (!isReservaTitle()) return;
+
+    if (!isEnabled()) {
+      deactivateClickCopyStyles();
+      return;
+    }
+
+    document.querySelectorAll('label.control.coupon-summary-value').forEach(el => {
+      const texto = el.textContent.trim();
+      if (/^[A-Z0-9]{5,8}$/.test(texto)) aplicarCliqueCopiar(el);
+    });
+
+    document.querySelectorAll('.col-coupon-service-title b').forEach(el => {
+      aplicarCliqueCopiar(el);
+    });
+
+    document.querySelectorAll('.col-coupon-service b').forEach(b => {
+      if (/\d{2}\/\d{2}\/\d{4}/.test(b.textContent)) aplicarCliqueCopiar(b);
+    });
+
+    document.querySelectorAll('td.text-center').forEach(td => {
+      const texto = td.textContent.trim();
+      if (/^BRL\s?\d+,\d{2}$/.test(texto)) aplicarCliqueCopiar(td);
+    });
+
+    document.querySelectorAll('tbody tr').forEach(tr => {
+      tr.querySelectorAll('td').forEach(td => {
+        const texto = td.textContent.trim();
+        if (ehBadgeTarifaOuStatus(td)) return;
+
+        if (/^[A-ZÀ-Ú][A-Za-zÀ-ú\s]{5,}$/.test(texto)) aplicarCliqueCopiar(td);
+        if (/\d{3,}[-]?\d*/.test(texto) && texto.length <= 20) aplicarCliqueCopiar(td, 'documento');
+        if (/^\d{5,}$/.test(texto)) aplicarCliqueCopiar(td);
+        if (/\(\d{2}\)\s?\d{4,5}-\d{4}/.test(texto)) aplicarCliqueCopiar(td);
+      });
+    });
+
+    document.querySelectorAll('.card-coupon-actions').forEach(card => {
+      [...card.querySelectorAll('*')].forEach(el => {
+        if (el.textContent?.trim() === 'E-mail') {
+          const valor = el.nextElementSibling;
+          if (valor) aplicarCliqueCopiar(valor);
+        }
+      });
+    });
+  }
+
+  /* =========================================================
+     APPLY / START
+  ========================================================= */
+  function applyAll() {
+    aplicarClickCopy();
+  }
+
+  let ultimaURL = location.href;
+
+  function init() {
+    setInterval(() => {
+      if (location.href !== ultimaURL) {
+        ultimaURL = location.href;
+        setTimeout(applyAll, 300);
+      }
+    }, 500);
+
+    const observer = new MutationObserver(() => applyAll());
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    applyAll();
+  }
+
+  function boot() {
+    if (!document.body) {
+      setTimeout(boot, 300);
+      return;
+    }
+    init();
+  }
+
+  boot();
+
+})();

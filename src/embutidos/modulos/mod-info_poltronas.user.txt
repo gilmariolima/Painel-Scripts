@@ -1,0 +1,527 @@
+// ==UserScript==
+// @name        Info das Poltronas
+// @version     1.0
+// @description Exibe data/horário/valor da tarifa no título do mapa de poltronas e uniformiza a cor das poltronas sugeridas.
+// @match       *://*.smarttravelit.com/*
+// @grant       none
+// @grupo        SmartBus
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    if (window.__tmPoltronasAtivo) return;
+    window.__tmPoltronasAtivo = true;
+
+    function visivel(elemento) {
+        return elemento.getClientRects().length > 0 &&
+            getComputedStyle(elemento).visibility !== 'hidden';
+    }
+
+    function obterData(servicerow) {
+        // Procura primeiro no próprio serviço e depois no grupo de resultados.
+        // Não usa a data de outro serviço nem campos de pesquisa ainda não enviada.
+        for (let escopo = servicerow; escopo; escopo = escopo.parentElement) {
+            for (const seletor of ['.service-date-title', '#txt-data-ida-retorno', '.active .date-value']) {
+                const candidatos = [...escopo.querySelectorAll(seletor)].filter(el => {
+                    const linha = el.closest('app-servicerow');
+                    if (linha) return linha === servicerow && visivel(el);
+                    let grupo = el.parentElement;
+                    while (grupo && !grupo.querySelector('app-servicerow')) grupo = grupo.parentElement;
+                    return (!grupo || grupo.contains(servicerow)) && visivel(el);
+                });
+                const datas = [...new Set(candidatos.map(el => el.textContent
+                    .replace(/\b(?:EM|COPIAR)\b/gi, '').replace(/\s+/g, ' ').trim())
+                    .filter(Boolean))];
+                if (datas.length === 1) return datas[0];
+                if (datas.length > 1) return '';
+            }
+        }
+        return '';
+    }
+
+    function atualizarDataViagem(servicerow, titulo) {
+        let data = titulo.querySelector('.tm-data-viagem');
+        if (!data) {
+            data = document.createElement('span');
+            data.className = 'tm-data-viagem';
+            titulo.insertBefore(data, titulo.querySelector('.tm-info'));
+        }
+        const dataTexto = obterData(servicerow);
+        const texto = dataTexto ? ` | ${dataTexto}` : '';
+        if (data.textContent !== texto) data.textContent = texto;
+    }
+
+    console.log("POLTRONAS.JS - VALOR DA TARIFA SELECIONADA");
+
+    // =========================================================
+    // REMOVER SEM ASSENTO
+    // =========================================================
+
+    function removerSemAssento() {
+
+        document
+            .querySelectorAll('oreonsbutton.btn-sale-no-seat')
+            .forEach(elemento => elemento.remove());
+
+        document
+            .querySelectorAll('oreonsbutton.-no-seat')
+            .forEach(elemento => elemento.remove());
+
+        document
+            .querySelectorAll('button.btn.btn-blue')
+            .forEach(botao => {
+
+                const texto = botao.textContent
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .toUpperCase();
+
+                if (texto.includes('SEM ASSENTO')) {
+
+                    const componente =
+                        botao.closest('oreonsbutton');
+
+                    if (componente) {
+                        componente.remove();
+                    } else {
+                        botao.remove();
+                    }
+                }
+            });
+    }
+
+
+    // =========================================================
+    // NORMALIZAR POLTRONAS SUGERIDAS
+    // =========================================================
+
+    function normalizarPoltronasSugeridas(raiz = document) {
+
+        raiz
+            .querySelectorAll('.item-suggested')
+            .forEach(poltrona => {
+
+                if (poltrona.style.getPropertyValue('background-color') === 'rgb(235, 235, 235)' &&
+                    poltrona.style.getPropertyPriority('background-color') === 'important' &&
+                    poltrona.style.getPropertyValue('border-color') === 'rgb(235, 235, 235)' &&
+                    poltrona.style.getPropertyPriority('border-color') === 'important' &&
+                    poltrona.style.getPropertyValue('box-shadow') === 'none' &&
+                    poltrona.style.getPropertyPriority('box-shadow') === 'important') return;
+
+                poltrona.style.setProperty(
+                    'background-color',
+                    '#EBEBEB',
+                    'important'
+                );
+
+                poltrona.style.setProperty(
+                    'border-color',
+                    '#EBEBEB',
+                    'important'
+                );
+
+                poltrona.style.setProperty(
+                    'box-shadow',
+                    'none',
+                    'important'
+                );
+
+                poltrona.querySelectorAll('.seat-number').forEach(numero => {
+                    numero.style.setProperty('color', '#667281', 'important');
+                });
+            });
+    }
+
+
+    // =========================================================
+    // PEGAR VALOR DA TARIFA SELECIONADA
+    // =========================================================
+
+function obterValorSelecionado(servicerow) {
+
+    const selecionado =
+        servicerow.querySelector(
+            '.div-family-price-list tr.selected'
+        );
+
+    if (!selecionado) {
+        return "";
+    }
+
+    const valorElemento =
+        selecionado.querySelector(
+            '.price-list-td-price'
+        );
+
+    if (!valorElemento) {
+        return "";
+    }
+
+    const texto =
+        valorElemento.textContent
+            .replace(/\s+/g, ' ')
+            .trim();
+
+    const encontrado =
+        texto.match(/(?:BRL|R\$)\s*[\d.,]+/i);
+
+    if (!encontrado) {
+        return "";
+    }
+
+    let numero =
+        encontrado[0]
+            .replace(/BRL|R\$/gi, '')
+            .trim();
+
+    // Converte formato brasileiro
+    // 45,990 -> 45.990
+    // 1.234,560 -> 1234.560
+    numero = numero.replace(/\./g, '');
+    numero = numero.replace(',', '.');
+
+    const valor = parseFloat(numero);
+
+    if (isNaN(valor)) {
+        return "";
+    }
+
+    return "BRL " + valor.toLocaleString("pt-BR", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+}
+    // =========================================================
+    // ATUALIZAR
+    // =========================================================
+
+    function atualizar(linha) {
+
+        (linha ? [linha] : document.querySelectorAll("app-servicerow"))
+            .forEach(servicerow => {
+
+                const titulo =
+                    servicerow.querySelector(
+                        ".seat-map-route h4"
+                    );
+
+                const horarioCol =
+                    servicerow.querySelector(
+                        ".service-info .service-col-3"
+                    );
+
+                const servico =
+                    servicerow.querySelector(
+                        ".service-info .service-col-7 span"
+                    );
+
+                if (
+                    !titulo || !visivel(titulo) ||
+                    !horarioCol ||
+                    !servico
+                ) {
+                    return;
+                }
+
+
+                // =================================================
+                // HORÁRIOS
+                // =================================================
+
+                const horarios =
+                    horarioCol.textContent
+                        .match(/\d{2}:\d{2}/g) || [];
+
+                const horarioSaida =
+                    horarios[0] || "";
+
+                const horarioChegada =
+                    horarios[1] || "";
+
+                let textoHorario = "";
+
+                if (
+                    horarioSaida &&
+                    horarioChegada
+                ) {
+
+                    textoHorario =
+                        `${horarioSaida} → ${horarioChegada}`;
+
+                } else if (horarioSaida) {
+
+                    textoHorario =
+                        horarioSaida;
+                }
+
+
+                // =================================================
+                // SERVIÇO
+                // =================================================
+
+                const nomeServico =
+                    servico.textContent.trim();
+
+
+                // =================================================
+                // VALOR DA TARIFA SELECIONADA
+                // =================================================
+
+                const valor =
+                    obterValorSelecionado(servicerow);
+
+
+                // =================================================
+                // TEXTO PRINCIPAL
+                // =================================================
+
+                const textoPrincipal =
+                    ` | ${textoHorario} | ${nomeServico}`;
+
+
+                // =================================================
+                // TÍTULO
+                // =================================================
+
+                if (titulo.style.display !== "block") titulo.style.display = "block";
+
+
+                let info =
+                    titulo.querySelector(".tm-info");
+
+
+                if (!info) {
+
+                    info =
+                        document.createElement("span");
+
+                    info.className =
+                        "tm-info";
+
+                    const principal =
+                        document.createElement("span");
+
+                    principal.className =
+                        "tm-info-principal";
+
+
+                    const valorSpan =
+                        document.createElement("span");
+
+                    valorSpan.className =
+                        "tm-info-valor";
+
+
+                    info.appendChild(principal);
+
+                    info.appendChild(valorSpan);
+
+                    titulo.appendChild(info);
+                }
+
+
+                const principal =
+                    info.querySelector(
+                        ".tm-info-principal"
+                    );
+
+                const valorSpan =
+                    info.querySelector(
+                        ".tm-info-valor"
+                    );
+
+
+                // =================================================
+                // ATUALIZA TEXTO
+                // =================================================
+
+                if (
+                    principal &&
+                    principal.textContent !== textoPrincipal
+                ) {
+
+                    principal.textContent =
+                        textoPrincipal;
+                }
+
+
+                // =================================================
+                // ATUALIZA VALOR
+                // =================================================
+
+                if (valorSpan) {
+
+                    if (valorSpan.textContent !== valor) {
+
+                        valorSpan.textContent =
+                            valor;
+                    }
+                }
+
+                atualizarDataViagem(servicerow, titulo);
+
+            });
+    }
+
+
+    // =========================================================
+    // CSS
+    // =========================================================
+
+    const style =
+        document.createElement("style");
+
+    style.textContent = `
+
+        .tm-data-viagem { font-weight: 700; white-space: nowrap; }
+
+        .seat-map-route h4 > div {
+            display: none !important;
+        }
+
+
+        .tm-info {
+
+            display: flex !important;
+
+            align-items: center !important;
+
+            width: 100% !important;
+
+            margin-left: 0 !important;
+
+            margin-top: 2px !important;
+
+            white-space: nowrap !important;
+        }
+
+
+        .tm-info-principal {
+
+            display: inline-block !important;
+
+            font-weight: 700 !important;
+
+            white-space: nowrap !important;
+        }
+
+
+        .tm-info-valor {
+
+            display: inline-block !important;
+
+            margin-left: auto !important;
+
+            padding-left: 30px !important;
+
+            font-size: 18px !important;
+
+            font-weight: 800 !important;
+
+            white-space: nowrap !important;
+        }
+
+
+        oreonsbutton.btn-sale-no-seat,
+        oreonsbutton.-no-seat {
+
+            display: none !important;
+        }
+
+
+        div.vehicle-wrapper {
+
+            margin-top: 10px !important;
+        }
+
+
+        .item-confirmed .seat-number {
+
+            color: #EF5250 !important;
+        }
+
+
+        .item-suggested {
+
+            background-color: #EBEBEB !important;
+
+            border-color: #EBEBEB !important;
+
+            box-shadow: none !important;
+        }
+
+
+        .item-suggested .seat-number {
+
+            color: #667281 !important;
+        }
+
+    `;
+
+    document.head.appendChild(style);
+
+
+    // =========================================================
+    // EXECUÇÃO
+    // =========================================================
+
+    atualizar();
+
+    removerSemAssento();
+
+    normalizarPoltronasSugeridas();
+
+
+    // =========================================================
+    // OBSERVER OTIMIZADO
+    // =========================================================
+
+    let atualizacaoAgendada = false;
+
+    const observer =
+        new MutationObserver(mudancas => {
+
+            const seletor = 'app-servicerow, .service-date-title, #txt-data-ida-retorno, .date-value';
+            const propria = '.tm-info, .tm-data-viagem';
+            const relevante = mudancas.some(mudanca => {
+                const el = mudanca.target.nodeType === 1 ? mudanca.target : mudanca.target.parentElement;
+                if (!el || el.closest(propria)) return false;
+                if (mudanca.attributeName === 'style' &&
+                    !el.matches('app-servicerow, .seat-map-route, .vehicle-wrapper') &&
+                    !el.querySelector('.seat-map-route')) return false;
+                if (el.closest(seletor)) return true;
+                return [...mudanca.addedNodes, ...mudanca.removedNodes].some(no =>
+                    no.nodeType === 1 && (no.matches(seletor) || no.querySelector(seletor)));
+            });
+            if (!relevante) return;
+
+            if (atualizacaoAgendada) {
+                return;
+            }
+
+            atualizacaoAgendada = true;
+
+            setTimeout(() => {
+
+                atualizar();
+
+                removerSemAssento();
+
+                normalizarPoltronasSugeridas();
+
+                atualizacaoAgendada = false;
+            }, 100);
+        });
+
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['class', 'hidden', 'style']
+    });
+
+
+})();

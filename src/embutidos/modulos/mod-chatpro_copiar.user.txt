@@ -1,0 +1,319 @@
+// ==UserScript==
+// @name        Copiar Mensagens e Telefone
+// @version     1.0
+// @description Copia o texto das mensagens do chat e o telefone do contato com um clique.
+// @match       *://app.chatpro.com.br/*
+// @grant       none
+// @grupo        ChatPro
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+    if (
+        location.hostname !== "app.chatpro.com.br" ||
+        !location.pathname.startsWith("/chat")
+    ) {
+        return;
+    }
+  /* =========================================================
+     ======================= ESTILOS =========================
+     ========================================================= */
+const style = document.createElement("style");
+
+style.textContent = `
+    .chatpro-msg {
+      border: 2px dashed transparent;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: border .15s ease, background .15s ease;
+    }
+
+    .chatpro-msg:hover {
+      border-color: rgba(0,120,255,.35);
+      background: rgba(0,120,255,.04);
+    }
+
+    .chatpro-copiado {
+      border-color: rgba(34,197,94,.7)!important;
+    }
+
+    #chatpro-copy-phone {
+      margin-right: 12px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: none;
+      background: #722F37;
+      color: #fff;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    #chatpro-copy-phone:hover {
+      filter: brightness(1.05);
+    }
+  `;
+document.head.appendChild(style);
+  /* =========================================================
+     ================== PARTE 1 — CHAT =======================
+     ========================================================= */
+
+  const MSG_CONTAINER = '.message, .chat-message, .msg';
+  const MSG_TEXT = '.msg-text';
+
+  function copiarTexto(texto, el) {
+    if (!texto) return;
+
+    navigator.clipboard.writeText(texto).then(() => {
+      el?.classList.add('chatpro-copiado');
+      setTimeout(() => el?.classList.remove('chatpro-copiado'), 500);
+    });
+  }
+
+  function clicouEmElementoNativo(target) {
+    if (!target) return false;
+
+    return !!target.closest(`
+      img,
+      video,
+      audio,
+      canvas,
+      svg,
+      a,
+      button,
+      input,
+      textarea,
+      select,
+      label,
+      [role="button"],
+      [role="slider"],
+      [role="menu"],
+      [role="menuitem"],
+      [contenteditable="true"],
+      .audio,
+      .audio-message,
+      .voice,
+      .voice-message,
+      .player,
+      .audio-player,
+      .react-audio-player,
+      .plyr,
+      .wavesurfer,
+      .speed,
+      .speed-control,
+      .playback-rate,
+      .media,
+      .media-message,
+      .message-audio,
+      .message-voice,
+      .chat-audio,
+      .chatpro-audio-ignore
+    `);
+  }
+
+  function mensagemTemAudio(msg) {
+    if (!msg) return false;
+
+    const texto = (msg.innerText || '').toLowerCase();
+
+    return !!(
+      msg.querySelector('audio') ||
+      msg.querySelector('video') ||
+      msg.querySelector('[role="slider"]') ||
+      msg.querySelector('button') ||
+      msg.querySelector('svg') ||
+      texto.includes('1x') ||
+      texto.includes('0:') ||
+      texto.includes('/ 0:')
+    );
+  }
+
+  function prepararMensagem(msg) {
+    if (msg.dataset.chatproReady) return;
+
+    msg.classList.add('chatpro-msg');
+
+    msg.addEventListener('click', e => {
+      // NÃO interfere em áudio, botão, imagem, card, link, velocidade, play etc.
+      if (clicouEmElementoNativo(e.target)) {
+        return;
+      }
+
+      // Se a mensagem for áudio e o clique não for claramente em texto, não copia.
+      if (mensagemTemAudio(msg)) {
+        const selAudio = window.getSelection();
+        const txtSelAudio = selAudio?.toString().trim();
+
+        if (!txtSelAudio) {
+          return;
+        }
+      }
+
+      const sel = window.getSelection();
+      const txtSel = sel?.toString().trim();
+
+      if (txtSel && msg.contains(sel.anchorNode)) {
+        e.stopPropagation();
+        copiarTexto(txtSel, msg);
+      } else {
+        const texto =
+          msg.querySelector(MSG_TEXT)?.innerText.trim() ||
+          msg.innerText.trim();
+
+        if (texto) {
+          e.stopPropagation();
+          copiarTexto(texto, msg);
+        }
+      }
+
+      sel?.removeAllRanges();
+    });
+
+    msg.dataset.chatproReady = 'true';
+  }
+
+  function aplicarMensagens() {
+    document.querySelectorAll(MSG_CONTAINER).forEach(prepararMensagem);
+  }
+
+  /* =========================================================
+     ================== PARTE 2 — TELEFONE ===================
+     ========================================================= */
+
+  function limparTelefone(t) {
+    return (t || '').replace(/\D+/g, '').replace(/^55/, '');
+  }
+
+  function obterTelefoneDireto() {
+    const h2s = [...document.querySelectorAll('h2')];
+    return h2s.find(h => /^\+?\d[\d\s()-]{8,}$/.test((h.innerText || '').trim()));
+  }
+
+  function elementoVisivel(el) {
+    if (!el || !el.isConnected) return false;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+
+    const st = getComputedStyle(el);
+    if (
+      st.display === 'none' ||
+      st.visibility === 'hidden' ||
+      parseFloat(st.opacity || '1') === 0
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function normalizarTexto(txt) {
+    return (txt || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function encontrarBotaoTransferir(header) {
+    if (!header) return null;
+
+    const candidatos = [
+      ...header.querySelectorAll('button, a, [role="button"], span, div')
+    ];
+
+    return candidatos.find(el => {
+      if (!elementoVisivel(el)) return false;
+      const txt = normalizarTexto(el.innerText);
+      return txt === 'transferir' || txt.includes('transferir');
+    }) || null;
+  }
+
+  function encontrarFilhoDireto(container, el) {
+    if (!container || !el) return null;
+
+    let atual = el;
+
+    while (atual && atual.parentElement && atual.parentElement !== container) {
+      atual = atual.parentElement;
+    }
+
+    if (atual && atual.parentElement === container) {
+      return atual;
+    }
+
+    return null;
+  }
+
+  function criarBotaoHeader() {
+    const header = document.querySelector('header.chat-messages-header');
+    if (!header) return;
+
+    let btn = document.getElementById('chatpro-copy-phone');
+
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'chatpro-copy-phone';
+      btn.innerText = '📞 Copiar';
+
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+
+        const telEl = obterTelefoneDireto();
+        if (!telEl) {
+          alert('Telefone não encontrado');
+          return;
+        }
+
+        const tel = limparTelefone(telEl.innerText);
+        if (!tel) {
+          alert('Telefone não encontrado');
+          return;
+        }
+
+        await navigator.clipboard.writeText(tel);
+
+        btn.innerText = '✅ Copiado';
+        setTimeout(() => {
+          btn.innerText = '📞 Copiar';
+        }, 1500);
+      };
+    }
+
+    const transferir = encontrarBotaoTransferir(header);
+    const ancora = encontrarFilhoDireto(header, transferir);
+
+    if (ancora) {
+      if (btn.parentElement !== header || btn.nextSibling !== ancora) {
+        header.insertBefore(btn, ancora);
+      }
+    } else {
+      if (btn.parentElement !== header) {
+        header.appendChild(btn);
+      }
+    }
+  }
+
+  /* =========================================================
+     ======================= START ===========================
+     ========================================================= */
+
+  function startTudo() {
+    aplicarMensagens();
+    criarBotaoHeader();
+
+    new MutationObserver(() => {
+      aplicarMensagens();
+      criarBotaoHeader();
+    }).observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  const wait = setInterval(() => {
+    if (document.querySelector('header.chat-messages-header')) {
+      clearInterval(wait);
+      startTudo();
+    }
+  }, 300);
+
+})();

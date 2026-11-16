@@ -1,0 +1,309 @@
+// ==UserScript==
+// @name        Copiar Mensagens e Telefone (Tallos)
+// @version     1.0
+// @description Copia o texto das mensagens do chat e o telefone do contato, oculta sugestões e ajusta badges/fila.
+// @match       *://app.tallos.com.br/*
+// @grant       none
+// @grupo        Tallos
+// ==/UserScript==
+
+(function () {
+  'use strict';
+if (
+    location.hostname !== "app.tallos.com.br" ||
+    !location.pathname.startsWith("/app/chat")
+) {
+    return;
+}
+  const BOTAO_ID = 'tallos-btn-telefone';
+
+const style = document.createElement("style");
+
+style.textContent = `
+    .bg-message-from-customer,
+    .bg-message-from-agent,
+    .bg-message-from-employee {
+      border: 2px dashed rgba(106, 0, 255, 0);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease;
+    }
+
+    .bg-message-from-customer:hover,
+    .bg-message-from-agent:hover,
+    .bg-message-from-employee:hover {
+      border-color: rgba(106, 0, 255, .35);
+      background: rgba(106, 0, 255, .04);
+    }
+
+    .tallos-copiado {
+      border-color: rgba(34,197,94,.6)!important;
+    }
+
+    #tallos-btn-telefone {
+      position: static;
+      display: inline-flex;
+      align-items: center;
+      vertical-align: middle;
+      flex-shrink: 0;
+      margin: 0 0 0 8px;
+      padding: 5px 8px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 6px;
+      background: linear-gradient(135deg, #4b5563, #1f2937);
+      color: #fff;
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 18px;
+      white-space: nowrap;
+      font-weight: 600;
+      letter-spacing: .3px;
+      box-shadow: none;
+      transition: all .18s ease;
+    }
+
+    #tallos-btn-telefone:hover {
+      background: linear-gradient(135deg, #6b7280, #374151);
+      box-shadow: none;
+    }
+
+    #tallos-btn-telefone:active {
+      transform: scale(.97);
+    }
+
+    #tallos-btn-telefone::before {
+      content: "📞 ";
+      font-size: 14px;
+      opacity: .9;
+    }
+
+    span[class*="Badge__Root"] {
+      min-width: 18px !important;
+      height: 18px !important;
+      padding: 0 6px !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      font-size: 11px !important;
+      font-weight: bold !important;
+      border-radius: 999px !important;
+      line-height: 18px !important;
+      box-sizing: border-box !important;
+    }
+
+    button.suggestion-button.tg-btn_tertiary,
+    button[title="Ver sugestão de resposta"],
+    button[aria-label="Ver sugestão de resposta"] {
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+
+    div[class*="InlineGroup__Root"] div[class*="RoundedIcon__Root"],
+    div[class*="InlineGroup__Root"] div[class*="RoundedIcon__Root"] * {
+      display: none !important;
+      opacity: 0 !important;
+      width: 0 !important;
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+    }
+`;
+
+document.head.appendChild(style);
+
+  const MSG_SELECTOR =
+    '.bg-message-from-customer, .bg-message-from-agent, .bg-message-from-employee';
+
+  function copiarTexto(texto, el) {
+    if (!texto) return;
+
+    navigator.clipboard.writeText(texto).then(() => {
+      if (el) {
+        el.classList.add('tallos-copiado');
+        setTimeout(() => el.classList.remove('tallos-copiado'), 500);
+      }
+    });
+  }
+
+  function prepararMensagem(msg) {
+    if (msg.dataset.tallosReady) return;
+
+    msg.addEventListener('click', e => {
+      e.stopPropagation();
+
+      const sel = window.getSelection();
+      const txtSel = sel?.toString().trim();
+
+      if (txtSel && msg.contains(sel.anchorNode)) {
+        copiarTexto(txtSel, msg);
+      } else {
+        copiarTexto(msg.innerText.trim(), msg);
+      }
+
+      sel?.removeAllRanges();
+    });
+
+    msg.dataset.tallosReady = 'true';
+  }
+
+  function aplicarMensagens() {
+    document.querySelectorAll(MSG_SELECTOR).forEach(prepararMensagem);
+  }
+
+  function esconderSugestaoResposta() {
+    document.querySelectorAll(`
+      button.suggestion-button.tg-btn_tertiary,
+      button[title="Ver sugestão de resposta"],
+      button[aria-label="Ver sugestão de resposta"]
+    `).forEach(btn => {
+      btn.style.setProperty('display', 'none', 'important');
+    });
+  }
+
+  function limparTelefone(t) {
+    return t.replace(/\D/g, '').replace(/^55/, '');
+  }
+
+  function buscarTelefoneNaTela() {
+    const elementos = [...document.querySelectorAll('p, span, div')];
+
+    const encontrado = elementos.find(el => {
+      const txt = el.innerText?.trim();
+      return el.children.length === 0 && /^\d{11,13}$/.test(txt) &&
+        el.getClientRects().length > 0 &&
+        !el.closest('#chat-messages-wrapper') &&
+        getComputedStyle(el).visibility !== 'hidden';
+    });
+
+    return encontrado || null;
+  }
+
+  function criarBotaoTelefone() {
+    const contato = buscarTelefoneNaTela();
+    const existente = document.getElementById(BOTAO_ID);
+    if (!contato) {
+      existente?.remove();
+      return;
+    }
+    if (existente) {
+      if (contato.nextElementSibling !== existente) contato.after(existente);
+      return;
+    }
+
+    const btn = document.createElement('button');
+    btn.id = BOTAO_ID;
+    btn.type = 'button';
+    btn.title = 'Copiar telefone do contato';
+    btn.innerText = 'Copiar Telefone';
+
+    btn.onclick = async evento => {
+      evento.preventDefault();
+      evento.stopPropagation();
+      const telefone = btn.previousElementSibling?.textContent.trim();
+
+      if (!telefone) return alert('Telefone não encontrado');
+
+      try {
+        await navigator.clipboard.writeText(limparTelefone(telefone));
+        btn.innerText = 'Copiado';
+      } catch (_) {
+        btn.innerText = 'Tente novamente';
+      }
+      setTimeout(() => btn.innerText = 'Copiar Telefone', 1500);
+    };
+
+    contato.after(btn);
+  }
+
+  function atualizarBadge() {
+    document.querySelectorAll('span[class*="Badge__Root"]').forEach(badge => {
+      const valor = parseInt(badge.textContent.trim(), 10);
+
+      if (isNaN(valor)) return;
+
+      if (valor === 0) {
+        badge.style.setProperty('background-color', '#2563eb', 'important');
+        badge.style.setProperty('border-color', '#2563eb', 'important');
+      } else {
+        badge.style.setProperty('background-color', '#E60F57', 'important');
+        badge.style.setProperty('border-color', '#E60F57', 'important');
+      }
+
+      badge.style.setProperty('color', '#fff', 'important');
+    });
+  }
+
+  function alternarFila() {
+    const dropdown = document.querySelector('div[class*="InlineGroup__Root"]');
+    if (!dropdown) return;
+
+    const tituloAtual = dropdown.innerText.toLowerCase();
+
+    dropdown.click();
+
+    setTimeout(() => {
+      const opcoes = [...document.querySelectorAll('div[class*="SelectOption__StyledListItem"]')];
+
+      if (tituloAtual.includes('meus atendimentos')) {
+        const fila = opcoes.find(el =>
+          el.innerText.toLowerCase().includes('fila de espera')
+        );
+        fila?.click();
+      } else {
+        const meus = opcoes.find(el =>
+          el.innerText.toLowerCase().includes('meus atendimentos')
+        );
+        meus?.click();
+      }
+    }, 250);
+  }
+
+  function transformarBonecoEmFila() {
+    const boneco = document.querySelector('span[data-testid="badge-queue-await"]');
+    if (!boneco) return;
+
+    if (boneco.dataset.tallosFila) return;
+
+    boneco.style.cursor = 'pointer';
+    boneco.title = 'Trocar Fila';
+
+    boneco.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      alternarFila();
+    }, true);
+
+    boneco.dataset.tallosFila = 'true';
+  }
+
+  function startTudo() {
+    aplicarMensagens();
+    criarBotaoTelefone();
+    transformarBonecoEmFila();
+    esconderSugestaoResposta();
+    atualizarBadge();
+
+    new MutationObserver(() => {
+      criarBotaoTelefone();
+      aplicarMensagens();
+      esconderSugestaoResposta();
+      atualizarBadge();
+      transformarBonecoEmFila();
+    }).observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  const wait = setInterval(() => {
+    if (document.querySelector('#chat-messages-wrapper')) {
+      clearInterval(wait);
+      startTudo();
+    }
+  }, 300);
+
+})();

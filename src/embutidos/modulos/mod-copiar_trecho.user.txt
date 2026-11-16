@@ -1,0 +1,159 @@
+// ==UserScript==
+// @name        Copiar Trecho da Pesquisa
+// @version     1.0
+// @description Adiciona botão para copiar o texto do trecho de ida/volta da pesquisa.
+// @match       *://*.smarttravelit.com/*
+// @grant       none
+// @grupo        SmartBus
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  if (!location.hostname.includes("smarttravelit.com")) {
+    return;
+  }
+
+  /* =========================================================
+     CONFIG (chave própria: copyTrecho)
+  ========================================================= */
+  const CONFIG_KEY = 'smartbus_unificado_config_v6';
+
+  function isEnabled() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}');
+      if (!('copyTrecho' in saved)) return true;
+      return !!saved.copyTrecho;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /* =========================================================
+     HELPERS
+  ========================================================= */
+  function addStyleOnce(id, css) {
+    if (document.getElementById(id)) return;
+    const style = document.createElement('style');
+    style.id = id;
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
+  function setCopiedState(btn, onText, offText, delay = 1200) {
+    btn.textContent = onText;
+    setTimeout(() => { btn.textContent = offText; }, delay);
+  }
+
+  /* =========================================================
+     ESTILOS
+  ========================================================= */
+  addStyleOnce('smartbus-copiar-trecho-style', `
+    .btn-copiar-trecho {
+      position: absolute;
+      top: 50px;
+      right: 6px;
+      z-index: 10;
+      padding: 4px 8px;
+      font-size: 12px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background: #3546b5;
+      color: #ffffff;
+      text-transform: uppercase;
+      box-shadow: 0 2px 6px rgba(0,0,0,.2);
+      user-select: none;
+    }
+
+    .btn-copiar-trecho:hover {
+      background: #29388e;
+    }
+  `);
+
+  /* =========================================================
+     COPIAR TRECHO
+  ========================================================= */
+  function removeCopyTrechoButtons() {
+    document.querySelectorAll('.btn-copiar-trecho').forEach(btn => btn.remove());
+  }
+
+  function createCopyTrechoButtons() {
+    if (!isEnabled()) {
+      removeCopyTrechoButtons();
+      return;
+    }
+
+    const trechos = document.querySelectorAll('div.col-search-way');
+    if (!trechos.length) return;
+
+    trechos.forEach(container => {
+      if (container.querySelector('.btn-copiar-trecho')) return;
+
+      const btn = document.createElement('button');
+      btn.className = 'btn-copiar-trecho';
+      btn.textContent = 'Copiar';
+
+      btn.addEventListener('click', () => {
+        if (!isEnabled()) return;
+
+        const texts = [];
+        container.childNodes.forEach(node => {
+          if (node.nodeType === Node.TEXT_NODE) {
+            texts.push(node.textContent.trim());
+          } else if (
+            node.nodeType === Node.ELEMENT_NODE &&
+            !node.classList.contains('btn-copiar-trecho')
+          ) {
+            texts.push(node.innerText.trim());
+          }
+        });
+
+        const finalText = texts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+
+        navigator.clipboard.writeText(finalText).then(() => {
+          setCopiedState(btn, '✅ Copiado', 'Copiar', 1500);
+        }).catch(() => {
+          alert('Falha ao copiar para a área de transferência');
+        });
+      });
+
+      container.style.position = 'relative';
+      container.appendChild(btn);
+    });
+  }
+
+  /* =========================================================
+     APPLY / START
+  ========================================================= */
+  function applyAll() {
+    createCopyTrechoButtons();
+  }
+
+  let ultimaURL = location.href;
+
+  function init() {
+    setInterval(() => {
+      if (location.href !== ultimaURL) {
+        ultimaURL = location.href;
+        setTimeout(applyAll, 300);
+      }
+    }, 500);
+
+    const observer = new MutationObserver(() => applyAll());
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    applyAll();
+  }
+
+  function boot() {
+    if (!document.body) {
+      setTimeout(boot, 300);
+      return;
+    }
+    init();
+  }
+
+  boot();
+
+})();

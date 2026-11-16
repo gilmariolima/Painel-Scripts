@@ -1,0 +1,605 @@
+// ==UserScript==
+// @name        Barra de Mensagens Rápidas
+// @version     1.0
+// @description Adiciona a barra de mensagens rápidas/modelos no rodapé do chat do Chatpro.
+// @match       *://app.chatpro.com.br/*
+// @grant       none
+// @grupo        ChatPro
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  if (
+    location.hostname !== "app.chatpro.com.br" ||
+    !location.pathname.startsWith("/")
+  ) {
+    return;
+  }
+
+  /* =========================================================
+     Núcleo da barra de mensagens rápidas (perfis, CRUD, arrastar).
+     Embutido aqui para não depender de nenhum arquivo externo.
+     ========================================================= */
+  function iniciarBarraMensagens(opcoes) {
+    const {
+      GRUPO_ID,
+      inserirTexto,
+      estiloGrupo,
+      prepararAncora,
+      inserirGrupo,
+      HOLD_TIME = 500
+    } = opcoes;
+
+    const LS_MSGS = 'tallos_msgs_custom';
+    const LS_ORDER = 'tallos_msgs_order';
+    const LS_PERFIS = 'tallos_perfis';
+
+    /* ================= STORAGE (PERFIS) ================= */
+    function carregarPerfis() {
+      const bruto = localStorage.getItem(LS_PERFIS);
+      if (bruto) return JSON.parse(bruto);
+
+      // migração do formato antigo (perfil único, sem nome)
+      const mensagensAntigas = JSON.parse(localStorage.getItem(LS_MSGS) || '[]');
+      const ordemAntiga = JSON.parse(localStorage.getItem(LS_ORDER) || '[]');
+      return {
+        ativo: 'Padrão',
+        perfis: { 'Padrão': { mensagens: mensagensAntigas, ordem: ordemAntiga } }
+      };
+    }
+
+    function salvarPerfis(dados) {
+      localStorage.setItem(LS_PERFIS, JSON.stringify(dados));
+    }
+
+    function dadosAtuais() {
+      const dados = carregarPerfis();
+      if (!dados.perfis[dados.ativo]) dados.perfis[dados.ativo] = { mensagens: [], ordem: [] };
+      return dados;
+    }
+
+    const getCustom = () => dadosAtuais().perfis[dadosAtuais().ativo].mensagens;
+    const saveCustom = msgs => { const d = dadosAtuais(); d.perfis[d.ativo].mensagens = msgs; salvarPerfis(d); };
+    const getOrder = () => dadosAtuais().perfis[dadosAtuais().ativo].ordem;
+    const saveOrder = ordem => { const d = dadosAtuais(); d.perfis[d.ativo].ordem = ordem; salvarPerfis(d); };
+
+    function criarPerfil() {
+      const nome = prompt('Nome do novo perfil:');
+      if (!nome) return;
+      const d = dadosAtuais();
+      if (d.perfis[nome]) return alert('Já existe um perfil com esse nome.');
+      d.perfis[nome] = { mensagens: [], ordem: [] };
+      d.ativo = nome;
+      salvarPerfis(d);
+      montarBarra(true);
+    }
+
+    function trocarPerfil(nome) {
+      const d = dadosAtuais();
+      d.ativo = nome;
+      salvarPerfis(d);
+      montarBarra(true);
+    }
+
+    function excluirPerfil(nome) {
+      const d = dadosAtuais();
+      if (Object.keys(d.perfis).length <= 1) return alert('Não é possível excluir o último perfil.');
+      if (!confirm(`Excluir perfil "${nome}"?`)) return;
+      delete d.perfis[nome];
+      if (d.ativo === nome) d.ativo = Object.keys(d.perfis)[0];
+      salvarPerfis(d);
+      montarBarra(true);
+    }
+
+    function renomearPerfil(nomeAntigo) {
+      const novoNome = prompt('Novo nome do perfil:', nomeAntigo);
+      if (!novoNome || novoNome === nomeAntigo) return;
+      const d = dadosAtuais();
+      if (d.perfis[novoNome]) return alert('Já existe um perfil com esse nome.');
+      d.perfis[novoNome] = d.perfis[nomeAntigo];
+      delete d.perfis[nomeAntigo];
+      if (d.ativo === nomeAntigo) d.ativo = novoNome;
+      salvarPerfis(d);
+      montarBarra(true);
+    }
+
+    function abrirModalPerfis() {
+      const dados = dadosAtuais();
+
+      const overlay = document.createElement('div');
+      overlay.style.cssText = `
+        position:fixed; inset:0;
+        background:rgba(0,0,0,.45);
+        display:flex; align-items:center; justify-content:center;
+        z-index:999999;
+      `;
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        background:#fff;
+        width:320px;
+        max-width:95%;
+        border-radius:10px;
+        padding:16px;
+        font-family:sans-serif;
+      `;
+
+      modal.innerHTML = '<h3>Perfis</h3>';
+
+      const lista = document.createElement('div');
+      lista.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-bottom:12px;';
+
+      Object.keys(dados.perfis).forEach(nome => {
+        const linha = document.createElement('div');
+        linha.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
+
+        const label = document.createElement('span');
+        label.innerText = (nome === dados.ativo ? '✅ ' : '') + nome;
+        label.style.cursor = 'pointer';
+        label.onclick = () => { overlay.remove(); trocarPerfil(nome); };
+
+        const acoes = document.createElement('div');
+        acoes.style.cssText = 'display:flex;gap:6px;';
+
+        const renomear = document.createElement('button');
+        renomear.innerText = '✏️';
+        renomear.onclick = () => { overlay.remove(); renomearPerfil(nome); };
+
+        const excluir = document.createElement('button');
+        excluir.innerText = '🗑️';
+        excluir.onclick = () => { overlay.remove(); excluirPerfil(nome); };
+
+        acoes.appendChild(renomear);
+        acoes.appendChild(excluir);
+
+        linha.appendChild(label);
+        linha.appendChild(acoes);
+        lista.appendChild(linha);
+      });
+
+      modal.appendChild(lista);
+
+      const novo = document.createElement('button');
+      novo.innerText = '+ Criar perfil';
+      novo.style.cssText = 'width:100%;padding:8px;margin-bottom:8px;';
+      novo.onclick = () => { overlay.remove(); criarPerfil(); };
+
+      const fechar = document.createElement('button');
+      fechar.innerText = 'Fechar';
+      fechar.style.cssText = 'width:100%;padding:8px;';
+      fechar.onclick = () => overlay.remove();
+
+      modal.appendChild(novo);
+      modal.appendChild(fechar);
+
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    }
+
+    /* ================= UTIL ================= */
+    const copiar = t => navigator.clipboard.writeText(t);
+
+    function feedback(btn) {
+      const o = btn.innerHTML;
+      btn.innerHTML = '✅';
+      setTimeout(() => (btn.innerHTML = o), 400);
+    }
+
+    /* ================= IMPORT / EXPORT TXT ================= */
+    function exportarTXT() {
+      const msgs = getCustom();
+      let txt = '';
+      msgs.forEach(m => {
+        txt += `---MSG---\nICON=${m.icon}\nTITLE=${m.title}\nTEXT=\n${m.texto}\n---END---\n\n`;
+      });
+      const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'chatpro_respostas.txt';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function importarTXT() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.txt';
+      input.onchange = () => {
+        const file = input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const blocks = reader.result
+            .split('---MSG---')
+            .map(b => b.trim())
+            .filter(Boolean);
+
+          const novos = blocks.map(b => {
+            const icon = (b.match(/ICON=(.*)/) || [,'📝'])[1];
+            const title = (b.match(/TITLE=(.*)/) || [,'SEM TITULO'])[1];
+            const text = (b.match(/TEXT=\n([\s\S]*?)\n---END---/) || [,''])[1];
+            return {
+              id: 'IMP_' + crypto.randomUUID(),
+              icon,
+              title,
+              texto: text.trim()
+            };
+          });
+
+          if (!novos.length) return alert('Arquivo inválido');
+
+          saveCustom(novos);
+          saveOrder(novos.map(n => n.id));
+          montarBarra(true);
+        };
+        reader.readAsText(file, 'UTF-8');
+      };
+      input.click();
+    }
+
+    /* ================= MODAL CRIAR / EDITAR ================= */
+    function abrirModalMensagem({ title='', texto='', emoji='📝' }, onConfirm) {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = `
+        position:fixed; inset:0;
+        background:rgba(0,0,0,.45);
+        display:flex; align-items:center; justify-content:center;
+        z-index:999999;
+      `;
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        background:#fff;
+        width:560px;
+        max-width:95%;
+        border-radius:10px;
+        padding:16px;
+        font-family:sans-serif;
+      `;
+      modal.innerHTML = `
+        <h3>Mensagem</h3>
+        <label>Emoji</label>
+        <input id="e" value="${emoji}" style="font-size:24px;width:80px;text-align:center"><br><br>
+        <label>Título</label>
+        <input id="t" value="${title}" style="width:100%;padding:6px"><br><br>
+        <label>Texto</label>
+        <textarea id="x" style="width:100%;height:220px">${texto}</textarea><br><br>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button id="c">Cancelar</button>
+          <button id="s">Salvar</button>
+        </div>
+      `;
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+
+      modal.querySelector('#c').onclick = () => overlay.remove();
+      modal.querySelector('#s').onclick = () => {
+        const t = modal.querySelector('#t').value.trim();
+        const x = modal.querySelector('#x').value;
+        const e = modal.querySelector('#e').value.trim() || '📝';
+        if (!t || !x) return alert('Preencha tudo');
+        overlay.remove();
+        onConfirm({ title:t, texto:x, emoji:e });
+      };
+    }
+
+    /* ================= CRUD ================= */
+    const adicionarMensagem = () =>
+      abrirModalMensagem({}, ({title,texto,emoji}) => {
+        const c = getCustom();
+        const id = 'CUST_' + Date.now();
+        c.push({ id, icon:emoji, title, texto });
+        saveCustom(c);
+        const o = getOrder(); o.push(id); saveOrder(o);
+        montarBarra(true);
+      });
+
+    const editarMensagem = msg =>
+      abrirModalMensagem(
+        { title:msg.title, texto:msg.texto, emoji:msg.icon },
+        ({title,texto,emoji}) => {
+          const c = getCustom();
+          const i = c.findIndex(m => m.id === msg.id);
+          if (i < 0) return;
+          c[i] = { ...c[i], title, texto, icon:emoji };
+          saveCustom(c);
+          montarBarra(true);
+        }
+      );
+
+    const excluirMensagem = msg => {
+      if (!confirm(`Excluir "${msg.title}"?`)) return;
+      saveCustom(getCustom().filter(m => m.id !== msg.id));
+      saveOrder(getOrder().filter(id => id !== msg.id));
+      montarBarra(true);
+    };
+
+    const LIMIAR_ARRASTE = 4;
+
+    function iniciarArraste(wrap, eInicio) {
+      const startX = eInicio.clientX;
+      const startY = eInicio.clientY;
+      let moveu = false;
+
+      function onMove(e) {
+        if (!moveu) {
+          if (Math.abs(e.clientX - startX) < LIMIAR_ARRASTE && Math.abs(e.clientY - startY) < LIMIAR_ARRASTE) return;
+          moveu = true;
+          wrap.classList.add('arrastando');
+        }
+
+        const alvo = document.elementFromPoint(e.clientX, e.clientY)?.closest('.wrap-btn');
+        if (!alvo || alvo === wrap || alvo.parentElement !== wrap.parentElement) return;
+
+        const irmaos = [...wrap.parentElement.children];
+        if (irmaos.indexOf(alvo) < irmaos.indexOf(wrap)) {
+          wrap.parentElement.insertBefore(wrap, alvo);
+        } else {
+          wrap.parentElement.insertBefore(wrap, alvo.nextSibling);
+        }
+      }
+
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        wrap.classList.remove('arrastando');
+
+        if (moveu) {
+          const novaOrdem = [...wrap.parentElement.querySelectorAll('.wrap-btn')].map(w => w.dataset.id);
+          saveOrder(novaOrdem);
+        }
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    }
+
+    /* ================= UI ================= */
+    function montarBarra(refresh=false) {
+      const ancora = prepararAncora();
+      if (!ancora) return;
+
+      let grupo = document.getElementById(GRUPO_ID);
+      if (grupo && refresh) grupo.remove();
+      if (grupo) return;
+
+      grupo = document.createElement('div');
+      grupo.id = GRUPO_ID;
+      grupo.style.cssText = estiloGrupo;
+
+      /* ➕ com menu */
+      const plusWrap = document.createElement('div');
+      plusWrap.style.position = 'relative';
+
+      const plus = document.createElement('button');
+      plus.innerHTML = '➕';
+      plus.dataset.tooltip = 'Opções';
+
+      const menu = document.createElement('div');
+      menu.style.cssText = `
+        position:absolute;
+        bottom:16px;
+        left:0;
+        background:#fff;
+        border:1px solid #ccc;
+        border-radius:6px;
+        padding:4px;
+        display:none;
+        flex-direction:column;
+        z-index:9999;
+        box-shadow:0 4px 10px rgba(0,0,0,.15);
+      `;
+
+      [
+        ['➕ Nova mensagem', adicionarMensagem],
+        ['📤 Exportar', exportarTXT],
+        ['📥 Importar', importarTXT],
+        ['👤 Perfis', abrirModalPerfis]
+      ].forEach(([label, fn]) => {
+        const b = document.createElement('button');
+        b.innerText = label;
+        b.style.cssText = `
+          background:none;
+          border:none;
+          padding:6px 10px;
+          text-align:left;
+          cursor:pointer;
+          white-space:nowrap;
+        `;
+        b.onclick = () => { menu.style.display='none'; fn(); };
+        menu.appendChild(b);
+      });
+
+      plus.onclick = e => {
+        e.stopPropagation();
+        menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+      };
+
+      document.addEventListener('click', () => menu.style.display = 'none');
+
+      plusWrap.appendChild(plus);
+      plusWrap.appendChild(menu);
+      grupo.appendChild(plusWrap);
+
+      /* mensagens */
+      const msgs = getCustom();
+      let ordem = getOrder();
+      if (!ordem.length) { ordem = msgs.map(m => m.id); saveOrder(ordem); }
+
+      ordem.forEach(id => {
+        const msg = msgs.find(m => m.id === id);
+        if (!msg) return;
+
+        const wrap = document.createElement('div');
+        wrap.className = 'wrap-btn';
+        wrap.dataset.id = msg.id;
+
+        const ctr = document.createElement('div');
+        ctr.className = 'controles';
+
+        [
+          ['✏️', () => editarMensagem(msg)],
+          ['🗑️', () => excluirMensagem(msg)]
+        ].forEach(([ico, fn]) => {
+          const b = document.createElement('button');
+          b.innerHTML = ico;
+          b.onclick = fn;
+          ctr.appendChild(b);
+        });
+
+        const btn = document.createElement('button');
+        btn.innerHTML = msg.icon;
+        btn.title = msg.title;
+        btn.dataset.tooltip = msg.title;
+
+        let t;
+        btn.onmousedown = () => t = setTimeout(() => wrap.classList.add('modo-ordem'), HOLD_TIME);
+        btn.onmouseup = btn.onmouseleave = () => clearTimeout(t);
+
+        btn.onclick = () => {
+          if (!wrap.classList.contains('modo-ordem')) {
+            inserirTexto(msg.texto);
+            feedback(btn);
+          }
+        };
+
+        btn.oncontextmenu = e => {
+          e.preventDefault();
+          copiar(msg.texto);
+          feedback(btn);
+        };
+
+        wrap.onmousedown = e => {
+          if (e.target.closest('.controles')) return;
+          iniciarArraste(wrap, e);
+        };
+
+        wrap.appendChild(ctr);
+        wrap.appendChild(btn);
+        grupo.appendChild(wrap);
+      });
+
+      inserirGrupo(grupo, ancora);
+    }
+
+    /* ================= STYLE ================= */
+    const style = document.createElement('style');
+    style.innerHTML = `
+      #${GRUPO_ID} .wrap-btn{position:relative;display:flex;justify-content:center;cursor:grab}
+
+      #${GRUPO_ID} .controles{
+        position:absolute;
+        top:-18px;
+        display:none;
+        gap:6px;
+      }
+
+      #${GRUPO_ID} .wrap-btn.modo-ordem .controles{
+        display:flex;
+      }
+
+      #${GRUPO_ID} .wrap-btn.arrastando{
+        opacity:.4;
+      }
+
+      #${GRUPO_ID} .controles button{
+        background:none;
+        border:none;
+        cursor:pointer;
+        font-size:14px;
+        padding:0;
+      }
+
+      /* TOOLTIP EM CIMA */
+      #${GRUPO_ID} button[data-tooltip]{
+        position:relative;
+      }
+
+      #${GRUPO_ID} button[data-tooltip]::after{
+        content: attr(data-tooltip);
+        position:absolute;
+        top:-34px;
+        left:50%;
+        transform:translateX(-50%);
+        background:#000;
+        color:#fff;
+        padding:4px 8px;
+        border-radius:6px;
+        font-size:11px;
+        white-space:nowrap;
+        opacity:0;
+        pointer-events:none;
+        transition:opacity .15s ease;
+        z-index:99999;
+      }
+
+      #${GRUPO_ID} button[data-tooltip]:hover::after{
+        opacity:1;
+      }
+    `;
+    document.head.appendChild(style);
+
+    new MutationObserver(() => montarBarra()).observe(document.body, { childList:true, subtree:true });
+    montarBarra();
+  }
+
+  /* =========================================================
+     USO NESTE SITE (Chatpro)
+     ========================================================= */
+  const FOOTER_SELECTOR = '.chat-messages-footer';
+
+  function inserirTexto(texto) {
+    const textarea = document.querySelector("textarea");
+    if (!textarea) return;
+
+    textarea.style.height = "70px";
+    textarea.style.minHeight = "70px";
+    textarea.style.maxHeight = "70px";
+    textarea.style.overflowY = "auto";
+    textarea.style.resize = "none";
+
+    textarea.focus();
+    textarea.select();
+    document.execCommand("insertText", false, texto);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function prepararAncora() {
+    const footer = document.querySelector(FOOTER_SELECTOR);
+    if (!footer) return null;
+
+    footer.style.height = "90px";
+    footer.style.minHeight = "90px";
+    footer.style.paddingTop = "4px";
+    footer.style.paddingBottom = "4px";
+    footer.style.position = "relative";
+
+    let barra = document.getElementById("chatpro-barra");
+    if (!barra) {
+      barra = document.createElement("div");
+      barra.id = "chatpro-barra";
+      footer.parentNode.insertBefore(barra, footer.nextSibling);
+    }
+    barra.style.cssText = 'margin-top:0px;margin-bottom:6px;';
+
+    return barra;
+  }
+
+  iniciarBarraMensagens({
+    GRUPO_ID: 'chatpro-botoes-mensagens',
+    inserirTexto,
+    estiloGrupo: `
+      display:flex;
+      align-items:center;
+      justify-content:flex-start;
+      gap:10px;
+      width:calc(100% - 20px);
+      min-height:50px;
+      box-sizing:border-box;
+      padding:10px 0;
+      margin-left:20px;
+      margin-top:-8px;
+    `,
+    prepararAncora,
+    inserirGrupo: (grupo, barra) => barra.appendChild(grupo)
+  });
+})();

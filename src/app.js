@@ -1,6 +1,7 @@
-// Painel de Scripts — executável com hub, usando o Microsoft Edge do usuário.
-// Abre o Edge com a porta de controle ligada, nos perfis já existentes,
-// e injeta o Painel de Scripts nas abas da SmartBus e da Tallos.
+// Painel de Scripts — núcleo do app (roda no processo principal do Electron).
+// Abre o Edge com a porta de controle ligada, nos perfis já existentes
+// (Perfil 1–6 para a SmartBus, Perfil 1 para a Tallos, até escanear), e injeta o
+// Painel de Scripts nas abas da SmartBus e da Tallos.
 'use strict';
 
 const fs = require('fs');
@@ -13,20 +14,12 @@ const puppeteer = require('puppeteer-core');
 
 const PONTE = require('./ponte.txt');
 const RUNTIME = require('./runtime.txt');
-const HUB_HTML = require('./hub.html');
 // Módulos que vêm com o app: um script por módulo (gerados por gerar-modulos.js)
 const EMBUTIDOS = require('./embutidos/modulos/index.js');
-const PAINEL_ANTIGO = require('./embutidos/painel.user.txt');
-const ICONE_ICO = Buffer.from(require('./icone/painel.ico'));
-const ICONE_PNG = Buffer.from(require('./icone/painel.png'));
-const CM_JS = require('./vendor/codemirror.js.txt');
-const CM_CSS = require('./vendor/codemirror.css.txt');
-const { version: VERSAO } = require('../package.json');
-const { procurarVersaoNova, baixarVersao, abrirExe } = require('./atualizador');
-const { criarVigiaOcioso } = require('./ocioso');
+// sha1 do Painel unificado que a 6.x instalava: se o arquivo dela for diferente, foi editado.
+const SHA_PAINEL_ANTIGO = '20ad556220a8c97655ab812747d2d6548a0e800f';
 
-const PORTA = Number(process.env.PAINEL_PORTA || 47321);
-const HUB_URL = `http://127.0.0.1:${PORTA}/`;
+const { version: VERSAO } = require('../package.json');
 
 // Scripts: o Painel de Scripts (que vem com o app) + os que você adiciona pelo hub.
 // A lista é montada em carregarListaScripts(), lendo o cabeçalho ==UserScript== de cada arquivo.
@@ -40,7 +33,9 @@ const SITES = Object.assign({
     smartbus: 'https://prod-guanabara-frontoffice-smartbus.smarttravelit.com/'
 }, process.env.PAINEL_SITES ? JSON.parse(process.env.PAINEL_SITES) : {});
 
-const PERFIL_TALLOS = 'Gilmario';
+// Perfis do Edge usados por cada sistema (pelo nome que aparece no Edge)
+const PERFIS_SMARTBUS_PADRAO = ['Perfil 1', 'Perfil 2', 'Perfil 3', 'Perfil 4', 'Perfil 5', 'Perfil 6'];
+const PERFIL_TALLOS = 'Perfil 1';
 
 const K = { painelEstado: 'tmm_painel_scripts_state_v1' };
 
@@ -52,7 +47,7 @@ const ARQ_CONFIG = path.join(BASE, 'config.json');
 
 const ARQ_LOG = path.join(BASE, 'painel.log');
 const doisDig = n => String(n).padStart(2, '0');
-// Sem janela preta: o registro vai para o arquivo painel.log (e para o console, se houver um).
+// O registro vai para o arquivo painel.log (e para o console, se houver um).
 const log = (...a) => {
     const d = new Date();
     const linha = `${doisDig(d.getDate())}/${doisDig(d.getMonth() + 1)} ${doisDig(d.getHours())}:${doisDig(d.getMinutes())}:${doisDig(d.getSeconds())} - ` +
@@ -66,6 +61,14 @@ const log = (...a) => {
 };
 const sha = t => crypto.createHash('sha1').update(t).digest('hex');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Nunca deixa travado: se a promessa não resolver em `ms`, devolve `padrao` (a promessa original
+// segue correndo sozinha, mas não bloqueia mais nada).
+function comTimeout(promessa, ms, padrao) {
+    return new Promise(resolve => {
+        const t = setTimeout(() => resolve(padrao), ms);
+        promessa.then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(padrao); });
+    });
+}
 
 function lerJSON(arq, padrao) {
     try { return JSON.parse(fs.readFileSync(arq, 'utf8')); } catch { return padrao; }
@@ -75,27 +78,6 @@ function gravarJSON(arq, dados) {
     fs.renameSync(arq + '.tmp', arq);
 }
 
-// Caixa de mensagem do Windows (o app não tem janela de console).
-function caixaMensagem(texto, { titulo = 'Painel de Scripts', simNao = false, icone = 'Information' } = {}) {
-    if (process.platform !== 'win32') { log(texto); return Promise.resolve(false); }
-    const aspas = t => `'${String(t).replace(/'/g, "''")}'`;
-    const script = [
-        'Add-Type -AssemblyName PresentationFramework',
-        `$r = [System.Windows.MessageBox]::Show(${aspas(texto)}, ${aspas(titulo)}, '${simNao ? 'YesNo' : 'OK'}', '${icone}')`,
-        'Write-Output $r'
-    ].join('; ');
-    return new Promise(resolve => {
-        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-            { windowsHide: true }, (err, out) => resolve(!err && /Yes/i.test(String(out))));
-    });
-}
-
-async function sairComPausa(msg) {
-    log(msg);
-    await caixaMensagem(`${msg}\n\nDetalhes no registro: ${ARQ_LOG}`, { icone: 'Error' });
-    process.exit(1);
-}
-
 // ---------- Configuração e script em disco ----------
 fs.mkdirSync(PASTA_SCRIPTS, { recursive: true });
 const config = Object.assign({ scripts: {}, hashes: {} }, lerJSON(ARQ_CONFIG, {}));
@@ -103,14 +85,63 @@ config.scripts = config.scripts || {};
 config.hashes = config.hashes || {};
 config.scriptsExtras = Array.isArray(config.scriptsExtras) ? config.scriptsExtras : [];
 config.modulosRemovidos = Array.isArray(config.modulosRemovidos) ? config.modulosRemovidos : [];
-const salvarConfig = () => { try { gravarJSON(ARQ_CONFIG, config); } catch (e) { log('Falha ao salvar config:', e.message); } };
+const salvarConfig = () => {
+    try {
+        gravarJSON(ARQ_CONFIG, config);
+        copiarCamposDoPerfil(config, perfilAtivo());
+        gravarJSON(ARQ_PERFIS, perfisApp);
+    } catch (e) { log('Falha ao salvar config:', e.message); }
+};
+
+// ---------- Perfis do app (troca de login) ----------
+// Cada perfil guarda estes campos da configuração. O perfil ativo fica carregado em "config"
+// e o resto do app continua lendo só de lá. O código dos scripts é o mesmo para todos os perfis.
+const ARQ_PERFIS = path.join(BASE, 'perfis.json');
+const CAMPOS_DO_PERFIL = ['scripts', 'navegador', 'abrirAoIniciar', 'perfisSmartbus', 'perfisTallos', 'perfisSmartbus_chrome', 'perfisTallos_chrome'];
+const CORES_PERFIL = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+
+function copiarCamposDoPerfil(de, para) {
+    for (const c of CAMPOS_DO_PERFIL) {
+        if (de[c] === undefined) delete para[c];
+        else para[c] = JSON.parse(JSON.stringify(de[c]));
+    }
+}
+
+function montarPerfilApp(nome, cor, origem) {
+    const perfil = { id: crypto.randomUUID(), nome, cor, criadoEm: Date.now() };
+    copiarCamposDoPerfil(origem, perfil);
+    return perfil;
+}
+
+// Na primeira vez, o que já estava configurado vira o perfil "Padrão".
+function carregarPerfisApp() {
+    const existe = fs.existsSync(ARQ_PERFIS);
+    const dados = lerJSON(ARQ_PERFIS, null);
+    if (Array.isArray(dados?.perfis) && dados.perfis.length) return dados;
+    if (existe) {
+        log('O arquivo de perfis estava danificado: guardado como perfis.json.danificado.');
+        try { fs.renameSync(ARQ_PERFIS, ARQ_PERFIS + '.danificado'); } catch {}
+    }
+    const padrao = montarPerfilApp('Padrão', CORES_PERFIL[0], config);
+    return { ativo: padrao.id, perfis: [padrao] };
+}
+
+const perfisApp = carregarPerfisApp();
+const perfilAtivo = () => perfisApp.perfis.find(p => p.id === perfisApp.ativo);
+if (!perfilAtivo()) perfisApp.ativo = perfisApp.perfis[0].id;
+copiarCamposDoPerfil(perfilAtivo(), config);
+config.scripts = config.scripts || {};
 
 const PASTA_MODULOS = path.join(PASTA_SCRIPTS, 'modulos');
 
 // Grava os módulos que vêm com o app na pasta. Se o arquivo em disco é uma versão
 // antiga sem edição, troca pela nova; se você editou, mantém a sua versão.
 // Módulos que já vieram no app e foram tirados: apaga o arquivo e o liga/desliga deles.
-const MODULOS_RETIRADOS = ['mod-leitor_documento', 'mod-idade_nascimento', 'mod-arrasto_promo'];
+const MODULOS_RETIRADOS = ['mod-leitor_documento', 'mod-idade_nascimento', 'mod-arrasto_promo',
+    'mod-alarme_flutuante', 'mod-colar_trecho_auto', 'mod-guanabara_print_horarios', 'mod-horario-servico',
+    'mod-preencher-email', 'mod-preencher_passageiros', 'mod-remover_acentos_nomes', 'mod-reserva_automatica',
+    'mod-smartbus_copiar_clique', 'mod-tallos_30min', 'mod-tallos_botoes_mensagens',
+    'mod-tallos_ocultar_botoes_barra', 'mod-chatpro_copiar_2'];
 
 function prepararArquivosScripts() {
     fs.mkdirSync(PASTA_MODULOS, { recursive: true });
@@ -119,6 +150,7 @@ function prepararArquivosScripts() {
         delete config.scripts[id];
         delete config.hashes[id];
     }
+    config.modulosRemovidos = config.modulosRemovidos.filter(id => !MODULOS_RETIRADOS.includes(id));
     for (const e of EMBUTIDOS) {
         const arq = path.join(PASTA_MODULOS, e.arquivo);
         const hNovo = sha(e.fonte);
@@ -149,7 +181,7 @@ function migrarPainelUnificado() {
     const antigo = path.join(PASTA_SCRIPTS, 'painel-de-scripts.user.js');
     try {
         const texto = fs.readFileSync(antigo, 'utf8');
-        if (sha(texto) !== sha(PAINEL_ANTIGO) && sha(texto) !== config.hashes.painel) {
+        if (sha(texto) !== SHA_PAINEL_ANTIGO && sha(texto) !== config.hashes.painel) {
             const arquivo = 'painel-unificado-editado.user.js';
             fs.writeFileSync(path.join(PASTA_SCRIPTS, arquivo), texto);
             config.scriptsExtras.push({ id: 'painel-unificado-editado', arquivo });
@@ -185,6 +217,19 @@ function lerCabecalho(fonte) {
         else if (chave === 'grupo') meta.grupo = valor;
     }
     return { meta, temCabecalho: true };
+}
+
+// Troca o valor de um campo (@name, @description) no cabeçalho ==UserScript==, mantendo
+// o resto do arquivo igual. Se o campo não existe ainda, insere logo depois do @name.
+function alterarCabecalho(fonte, campo, novoValor) {
+    const linhaCampo = new RegExp(`^([ \\t]*//[ \\t]*@${campo}[ \\t]+).*$`, 'm');
+    if (linhaCampo.test(fonte)) {
+        return fonte.replace(linhaCampo, (_, prefixo) => prefixo + novoValor);
+    }
+    if (!novoValor) return fonte;
+    const linhaName = /^([ \t]*\/\/[ \t]*@name[ \t]+.*)$/m;
+    if (!linhaName.test(fonte)) return fonte;
+    return fonte.replace(linhaName, linha => `${linha}\n// @${campo}  ${novoValor}`);
 }
 
 const escRe = t => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
@@ -395,9 +440,11 @@ const acharNavegador = (n = nav()) => n.exes().find(p => p && fs.existsSync(p)) 
 const LISTAS = { smartbus: 'perfisSmartbus', tallos: 'perfisTallos' };
 // Cada navegador tem as suas listas (no Chrome os perfis têm outros nomes)
 const chaveLista = site => LISTAS[site] + (nav().id === 'chrome' ? '_chrome' : '');
+const PADRAO = { smartbus: PERFIS_SMARTBUS_PADRAO, tallos: [PERFIL_TALLOS] };
 const perfisDe = site => {
     const lista = config[chaveLista(site)];
-    return Array.isArray(lista) ? lista : [];
+    if (Array.isArray(lista)) return lista;
+    return nav().id === 'chrome' ? [] : PADRAO[site];
 };
 const definirPerfis = (site, lista) => { config[chaveLista(site)] = lista; salvarConfig(); };
 const perfisSmartbus = () => perfisDe('smartbus');
@@ -583,6 +630,23 @@ async function conectarEdge() {
     try { return await conectando; } finally { conectando = null; }
 }
 
+// A conexão pode ficar "zumbi" (socket preso, sem fechar limpo) depois de uma ausência longa,
+// sem nunca disparar o 'disconnected' acima — e nesse caso o loop de reconexão (que só reage
+// quando `browser` fica null) nunca age. Esta função testa de verdade com um comando CDP e,
+// se não responder, força o reset.
+async function verificarVivo() {
+    if (!browser?.connected) return;
+    const esteBrowser = browser;
+    const vivo = await comTimeout(browser.version().then(() => true), 5000, false);
+    if (!vivo && browser === esteBrowser) {
+        log(`O ${nav().nome} do Painel parou de responder (provável ausência longa); reconectando.`);
+        try { browser.disconnect(); } catch {}
+        browser = null;
+        paginas.clear();
+        notificarHub();
+    }
+}
+
 async function esperarEdge(segundos) {
     for (let i = 0; i < segundos * 2; i++) {
         if (await conectarEdge()) return true;
@@ -603,10 +667,12 @@ let wsAtual = '';
 async function alvosDoEdge() {
     if (!browser?.connected) return [];
     try {
-        const s = await browser.target().createCDPSession();
-        const { targetInfos } = await s.send('Target.getTargets');
-        s.detach().catch(() => {});
-        return targetInfos.filter(t => t.type === 'page');
+        return await comTimeout((async () => {
+            const s = await browser.target().createCDPSession();
+            const { targetInfos } = await s.send('Target.getTargets');
+            s.detach().catch(() => {});
+            return targetInfos.filter(t => t.type === 'page');
+        })(), 5000, []);
     } catch { return []; }
 }
 
@@ -630,9 +696,21 @@ async function perfilTemAba(dir, site) {
     const ctx = sessao.contextos[dir];
     if (!ctx) return false;
     const host = new URL(SITES[site]).hostname;
-    return (await alvosDoEdge()).some(t => {
+    const info = (await alvosDoEdge()).find(t => {
         try { return t.browserContextId === ctx && new URL(t.url).hostname === host; } catch { return false; }
     });
+    if (!info) return false;
+    // A aba pode continuar existindo (mesma URL) mas descartada/congelada pelo navegador depois
+    // de um período longo sem uso — nesse caso ela não conta como "já aberta": tenta recarregar.
+    const alvoPuppeteer = browser?.targets()?.find(t => t._targetId === info.targetId);
+    const page = alvoPuppeteer ? await alvoPuppeteer.page().catch(() => null) : null;
+    if (!page) return true; // não achei a Page do puppeteer: assume ok para não duplicar aba
+    const viva = await comTimeout(page.evaluate(() => true), 4000, false);
+    if (viva) return true;
+    log(`Aba de ${site} parece travada no perfil ${dir}; recarregando.`);
+    const recarregou = await comTimeout(page.reload({ timeout: 15000 }).then(() => true), 16000, false);
+    if (!recarregou) log(`Não consegui recarregar a aba de ${site} no perfil ${dir}; vou abrir outra.`);
+    return recarregou;
 }
 
 async function abrirNoEdge(url, nomePerfil, { app = false } = {}) {
@@ -729,7 +807,7 @@ async function copiarPerfis({ fecharEdge }) {
             limparCachePerfis();
             log(`Perfis copiados: ${origens.map(p => p.nome).join(', ')} (${copia.arquivos} arquivos).`);
             const doHub = perfilDoHub();
-            executarEdge([...argsPerfil(doHub ? perfilPorNome(doHub) : null), `--app=${HUB_URL}`]);
+            executarEdge(argsPerfil(doHub ? perfilPorNome(doHub) : null));
             esperarEdge(20).catch(() => {});
         } catch (e) {
             copia.erro = e.message;
@@ -959,6 +1037,167 @@ async function recarregarScripts({ recarregarAbas = true } = {}) {
     }
 }
 
+// ---------- Perfis do app: criar, trocar, editar e excluir ----------
+// Solta o navegador atual (sem fechar as janelas dele) para o Painel passar a usar outro.
+function soltarNavegador() {
+    const antigo = browser;
+    browser = null;
+    if (antigo) { try { antigo.disconnect(); } catch {} }
+    paginas.clear();
+}
+
+function validarNomePerfil(bruto, idAtual) {
+    const nome = String(bruto || '').trim();
+    if (!nome) return { erro: 'Digite o nome do perfil.' };
+    if (nome.length > 30) return { erro: 'Use um nome com até 30 letras.' };
+    if (perfisApp.perfis.some(p => p.id !== idAtual && p.nome.toLowerCase() === nome.toLowerCase())) {
+        return { erro: `Já existe um perfil chamado "${nome}".` };
+    }
+    return { nome };
+}
+
+const scriptsLigados = scripts => Object.keys(SCRIPTS).filter(id => scripts?.[id]).length;
+
+function criarPerfilApp(nome, cor, base) {
+    const perfil = montarPerfilApp(nome, cor, config);
+    if (base === 'vazio' || base === 'todos') {
+        perfil.scripts = {};
+        for (const id of [...EMBUTIDOS.map(e => e.id), ...Object.keys(SCRIPTS)]) perfil.scripts[id] = base === 'todos';
+    }
+    perfisApp.perfis.push(perfil);
+    salvarConfig();
+    log(`Perfil criado: ${nome}.`);
+    return perfil;
+}
+
+// Troca o perfil sem fechar nada: só o que mudou de estado é ligado ou desligado nas abas abertas.
+async function trocarPerfilApp(id) {
+    const novo = perfisApp.perfis.find(p => p.id === id);
+    if (id === perfisApp.ativo) return { aoVivo: true };
+    salvarConfig();
+    const antes = config.scripts;
+    const navAntes = nav().id;
+    perfisApp.ativo = id;
+    copiarCamposDoPerfil(novo, config);
+    config.scripts = config.scripts || {};
+    if (!acharNavegador()) config.navegador = navAntes;
+    limparCachePerfis();
+    carregarListaScripts();
+    salvarConfig();
+    log(`Perfil em uso: ${novo.nome}.`);
+
+    let aoVivo = true;
+    if (nav().id !== navAntes) {
+        soltarNavegador();
+        if (copiaPronta()) conectarEdge().catch(() => {});
+    } else {
+        const ids = Object.keys(SCRIPTS);
+        const desligar = ids.filter(i => antes[i] && !config.scripts[i]);
+        const ligar = ids.filter(i => !antes[i] && config.scripts[i]);
+        if (desligar.length) aoVivo = await alternarAoVivo(desligar, false);
+        if (ligar.length) aoVivo = await alternarAoVivo(ligar, true) && aoVivo;
+    }
+    return { aoVivo };
+}
+
+// ---------- Exportar e importar perfis (levar para outra máquina) ----------
+// O arquivo leva a escolha de scripts do perfil e o código de todos os scripts adicionados,
+// mais os módulos do app que foram editados. As listas de perfis do navegador ficam de fora:
+// são de cada máquina.
+const TIPO_EXPORTACAO = 'painel-de-scripts/perfil';
+
+function exportarPerfilApp(id) {
+    const perfil = perfisApp.perfis.find(p => p.id === id);
+    const escolha = id === perfisApp.ativo ? config.scripts : (perfil.scripts || {});
+    const scripts = Object.values(SCRIPTS)
+        .filter(s => !s.embutido || s.editado)
+        .map(s => ({ id: s.id, nome: s.nome, embutido: s.embutido, codigo: s.fonte }));
+    return {
+        tipo: TIPO_EXPORTACAO, formato: 1, versaoApp: VERSAO, exportadoEm: new Date().toISOString(),
+        perfil: { nome: perfil.nome, cor: perfil.cor, scripts: escolha },
+        scripts
+    };
+}
+
+async function importarPerfilApp(dados) {
+    if (dados?.tipo !== TIPO_EXPORTACAO || !dados.perfil || !Array.isArray(dados.scripts)) {
+        return { erro: 'Este arquivo não é um perfil exportado pelo Painel de Scripts.' };
+    }
+    const nome = String(dados.perfil.nome || '').trim().slice(0, 30) || 'Importado';
+    const res = { nome, novos: 0, atualizados: 0, iguais: 0, invalidos: [], falhasRequire: [] };
+    const idNovo = {};
+
+    for (const sc of dados.scripts) {
+        const codigo = String(sc.codigo || '');
+        const v = validarScript(codigo);
+        if (v.erro) { res.invalidos.push(`${sc.nome || sc.id}: ${v.erro}`); continue; }
+        if (sc.embutido) {
+            const e = embutidoPorId(sc.id);
+            if (!e || MODULOS_RETIRADOS.includes(sc.id)) { res.invalidos.push(`${sc.nome}: o módulo não existe nesta versão do app.`); continue; }
+            const arq = path.join(PASTA_MODULOS, e.arquivo);
+            if (fs.existsSync(arq) && sha(fs.readFileSync(arq, 'utf8')) === sha(codigo)) res.iguais++;
+            else { fs.writeFileSync(arq, codigo); res.atualizados++; }
+            idNovo[sc.id] = sc.id;
+            continue;
+        }
+        // Mesmo código já instalado: reaproveita. Mesmo id: é o mesmo script, atualiza o código.
+        const mesmoCodigo = config.scriptsExtras.find(x => SCRIPTS[x.id] && sha(SCRIPTS[x.id].fonte) === sha(codigo));
+        const mesmoId = config.scriptsExtras.find(x => x.id === sc.id);
+        let id;
+        if (mesmoCodigo) { id = mesmoCodigo.id; res.iguais++; }
+        else if (mesmoId) {
+            id = mesmoId.id;
+            fs.writeFileSync(path.join(PASTA_SCRIPTS, mesmoId.arquivo), codigo);
+            res.atualizados++;
+        } else {
+            const base = (String(sc.id || '').replace(/[^a-zA-Z0-9_-]/g, '') || 'script').slice(0, 40);
+            id = base;
+            for (let i = 2; SCRIPTS[id] || config.scriptsExtras.some(x => x.id === id) || id === 'painel' || id.startsWith('mod-'); i++) id = `${base}-${i}`;
+            config.scriptsExtras.push({ id, arquivo: `${id}.user.js` });
+            fs.writeFileSync(path.join(PASTA_SCRIPTS, `${id}.user.js`), codigo);
+            for (const p of perfisApp.perfis) (p.scripts = p.scripts || {})[id] = false;
+            config.scripts[id] = false;
+            res.novos++;
+        }
+        idNovo[sc.id] = id;
+        res.falhasRequire.push(...await baixarRequires(v.meta));
+    }
+
+    carregarListaScripts();
+    const escolha = {};
+    for (const [id, ligado] of Object.entries(dados.perfil.scripts || {})) {
+        const alvo = idNovo[id] || id;
+        if (SCRIPTS[alvo]) escolha[alvo] = Boolean(ligado);
+    }
+
+    let perfil = perfisApp.perfis.find(p => p.nome.toLowerCase() === nome.toLowerCase());
+    res.perfilExistia = Boolean(perfil);
+    if (!perfil) {
+        const cor = CORES_PERFIL.includes(dados.perfil.cor) ? dados.perfil.cor : CORES_PERFIL[0];
+        perfil = montarPerfilApp(nome, cor, config);
+        // Perfil novo: só fica ligado o que estava ligado no arquivo.
+        perfil.scripts = Object.fromEntries(Object.keys(SCRIPTS).map(id => [id, false]));
+        perfisApp.perfis.push(perfil);
+    }
+    if (perfil.id === perfisApp.ativo) Object.assign(config.scripts, escolha);
+    else perfil.scripts = { ...(perfil.scripts || {}), ...escolha };
+    res.ligados = Object.values(escolha).filter(Boolean).length;
+    res.ativo = perfil.id === perfisApp.ativo;
+    salvarConfig();
+    await recarregarScripts({ recarregarAbas: false });
+    log(`Perfil importado: ${nome} (${res.novos} scripts novos, ${res.atualizados} atualizados, ${res.iguais} já existiam).`);
+    for (const x of res.invalidos) log('Não importado:', x);
+    return res;
+}
+
+async function excluirPerfilApp(id) {
+    if (id === perfisApp.ativo) await trocarPerfilApp(perfisApp.perfis.find(p => p.id !== id).id);
+    const nome = perfisApp.perfis.find(p => p.id === id).nome;
+    perfisApp.perfis = perfisApp.perfis.filter(p => p.id !== id);
+    salvarConfig();
+    log(`Perfil excluído: ${nome}.`);
+}
+
 // ---------- Estado para o hub ----------
 function infoAtalho(n) {
     const p = perfilPorNome(n);
@@ -1006,6 +1245,14 @@ async function estadoAtual() {
             disponiveis: [...new Set([...lerPerfisDe(nav().dados), ...lerPerfisDe(nav().copia)].map(p => p.nome))]
                 .filter(n => !nomesPerfis().some(x => chaveNome(x) === chaveNome(n)))
         },
+        perfisApp: {
+            ativo: perfisApp.ativo,
+            cores: CORES_PERFIL,
+            lista: perfisApp.perfis.map(p => ({
+                id: p.id, nome: p.nome, cor: p.cor,
+                ligados: scriptsLigados(p.id === perfisApp.ativo ? config.scripts : p.scripts)
+            }))
+        },
         modulosRemovidos: config.modulosRemovidos.length,
         scripts: Object.values(SCRIPTS).map(s => ({
             id: s.id, nome: s.nome, ativo: Boolean(config.scripts[s.id]), versao: s.meta.version || '',
@@ -1016,177 +1263,109 @@ async function estadoAtual() {
 }
 
 // ---------- Hub ----------
-const clientesSSE = new Set();
+let ganchos = { aoMudar() {}, sair() {} };
 let timerHub = null;
 function notificarHub() {
     clearTimeout(timerHub);
-    timerHub = setTimeout(() => {
-        for (const res of clientesSSE) { try { res.write('data: x\n\n'); } catch {} }
-    }, 250);
+    timerHub = setTimeout(() => ganchos.aoMudar(), 250);
 }
 
-function lerCorpo(req) {
-    return new Promise(resolve => {
-        let b = '';
-        req.on('data', c => { b += c; if (b.length > 1e6) req.destroy(); });
-        req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } });
-    });
-}
-
-function responder(res, status, dados) {
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify(dados));
-}
+const resp = (status, dados) => ({ status, dados });
 
 function abrirPasta(dir) {
     const cmd = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
     try { spawn(cmd, [dir], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch {}
 }
 
-async function rota(req, res) {
-    const url = new URL(req.url, HUB_URL);
+// Atende um pedido do hub (vem pelo IPC) e devolve { status, dados }.
+async function tratarApi(caminho, corpoRecebido) {
+    if (caminho === '/api/estado') return resp(200, await estadoAtual());
+    const corpo = corpoRecebido && typeof corpoRecebido === 'object' ? corpoRecebido : {};
 
-    if (req.method === 'GET' && url.pathname === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        return res.end(HUB_HTML);
-    }
-    if (url.pathname === '/vendor/codemirror.js' || url.pathname === '/vendor/codemirror.css') {
-        const js = url.pathname.endsWith('.js');
-        res.writeHead(200, { 'Content-Type': (js ? 'application/javascript' : 'text/css') + '; charset=utf-8', 'Cache-Control': 'max-age=86400' });
-        return res.end(js ? CM_JS : CM_CSS);
-    }
-    if (url.pathname === '/favicon.ico' || url.pathname === '/icone.png') {
-        const ico = url.pathname === '/favicon.ico';
-        res.writeHead(200, { 'Content-Type': ico ? 'image/x-icon' : 'image/png', 'Cache-Control': 'max-age=86400' });
-        return res.end(ico ? ICONE_ICO : ICONE_PNG);
-    }
-    if (req.method === 'GET' && url.pathname === '/api/ping') {
-        return responder(res, 200, { ok: true, app: 'painel-de-scripts' });
-    }
-    if (req.method === 'GET' && url.pathname === '/eventos') {
-        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-        res.write('retry: 2000\n\n');
-        clientesSSE.add(res);
-        req.on('close', () => clientesSSE.delete(res));
-        return;
-    }
-
-    const origem = req.headers.origin;
-    if (req.headers['x-painel'] !== '1' || (origem && origem !== HUB_URL.slice(0, -1))) {
-        return responder(res, 403, { erro: 'Acesso negado' });
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/estado') {
-        return responder(res, 200, await estadoAtual());
-    }
-    if (req.method !== 'POST') return responder(res, 404, { erro: 'Não encontrado' });
-
-    const corpo = await lerCorpo(req);
-
-    switch (url.pathname) {
-        case '/api/mostrar-hub':
-            garantirHubVisivel(8).catch(() => {});
-            if (copiaPronta()) await abrirNoEdge(HUB_URL, perfilDoHub(), { app: true }).catch(() => {});
-            else executarEdge([`--app=${HUB_URL}`], { doPainel: false });
-            return responder(res, 200, { ok: true });
-
+    switch (caminho) {
         case '/api/sair':
-            responder(res, 200, { ok: true });
             log('Painel fechado pelo hub.');
-            setTimeout(() => { if (timerSalvar) salvarAgora(); process.exit(0); }, 300);
-            return;
-
-        case '/api/atualizacao/verificar': {
-            if (!ehExe()) return responder(res, 400, { erro: 'A atualização só funciona no app instalado.' });
-            versaoEncontrada = await procurarVersaoNova({ atual: VERSAO, url: process.env.PAINEL_RELEASES_URL });
-            return responder(res, 200, { atual: VERSAO, nova: versaoEncontrada?.versao || null });
-        }
-
-        case '/api/atualizacao/instalar': {
-            if (!versaoEncontrada) return responder(res, 400, { erro: 'Verifique as atualizações primeiro.' });
-            if (instalandoVersao) return responder(res, 409, { erro: 'A atualização já está em andamento.' });
-            instalandoVersao = true;
-            try {
-                log(`Baixando a versão ${versaoEncontrada.versao}...`);
-                const conteudo = await baixarVersao(versaoEncontrada);
-                await fs.promises.mkdir(PASTA_ATUALIZACAO, { recursive: true });
-                const arq = path.join(PASTA_ATUALIZACAO, 'PainelDeScripts.exe');
-                await fs.promises.writeFile(arq, conteudo);
-                // O exe novo fecha este processo, troca o instalado e reabre (cuidarDaInstalacao).
-                await abrirExe(arq, [ARG_ATUALIZACAO], { cwd: PASTA_ATUALIZACAO });
-                return responder(res, 200, { ok: true });
-            } catch (e) {
-                log('Falha ao atualizar:', e.message);
-                return responder(res, 500, { erro: e.message });
-            } finally {
-                instalandoVersao = false;
-            }
-        }
+            setTimeout(() => ganchos.sair(), 300);
+            return resp(200, { ok: true });
 
         case '/api/registro':
             if (process.platform === 'win32') spawn('notepad.exe', [ARQ_LOG], { detached: true, stdio: 'ignore' }).unref();
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
 
         case '/api/navegador': {
             limparCachePerfis();
             const id = corpo.id === 'chrome' ? 'chrome' : 'edge';
-            if (!acharNavegador(NAVEGADORES[id])) return responder(res, 400, { erro: `${NAVEGADORES[id].nome} não está instalado neste computador.` });
+            if (!acharNavegador(NAVEGADORES[id])) return resp(400, { erro: `${NAVEGADORES[id].nome} não está instalado neste computador.` });
             if (config.navegador !== id) {
-                // Solta o navegador atual (sem fechar as janelas dele) e passa a usar o outro.
-                const antigo = browser;
-                browser = null;
-                if (antigo) { try { antigo.disconnect(); } catch {} }
-                paginas.clear();
+                soltarNavegador();
                 config.navegador = id;
                 salvarConfig();
                 log(`Navegador escolhido: ${NAVEGADORES[id].nome}.`);
                 if (copiaPronta()) conectarEdge().catch(() => {});
             }
             notificarHub();
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
         }
 
         case '/api/config':
             if ('abrirAoIniciar' in corpo) config.abrirAoIniciar = Boolean(corpo.abrirAoIniciar);
             salvarConfig();
             notificarHub();
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
 
         case '/api/scripts/codigo': {
             const sc = SCRIPTS[corpo.id];
-            if (!sc) return responder(res, 404, { erro: 'Script não encontrado.' });
-            return responder(res, 200, { id: sc.id, nome: sc.nome, codigo: sc.fonte, embutido: sc.embutido, original: sc.embutido ? (embutidoPorId(sc.id)?.fonte || null) : null });
+            if (!sc) return resp(404, { erro: 'Script não encontrado.' });
+            return resp(200, { id: sc.id, nome: sc.nome, codigo: sc.fonte, embutido: sc.embutido, original: sc.embutido ? (embutidoPorId(sc.id)?.fonte || null) : null });
+        }
+
+        case '/api/scripts/renomear': {
+            const sc = SCRIPTS[corpo.id];
+            if (!sc) return resp(404, { erro: 'Script não encontrado.' });
+            const nome = String(corpo.nome || '').trim();
+            if (!nome) return resp(400, { erro: 'Digite o nome do script.' });
+            const descricao = String(corpo.descricao || '').trim();
+            let codigo = alterarCabecalho(sc.fonte, 'name', nome);
+            codigo = alterarCabecalho(codigo, 'description', descricao);
+            const v = validarScript(codigo);
+            if (v.erro) return resp(400, { erro: v.erro });
+            fs.writeFileSync(path.join(PASTA_SCRIPTS, sc.arquivo), codigo);
+            await recarregarScripts({ recarregarAbas: false });
+            notificarHub();
+            return resp(200, { ok: true });
         }
 
         case '/api/scripts/salvar':
         case '/api/scripts/novo': {
             const codigo = String(corpo.codigo || '');
             const v = validarScript(codigo);
-            if (v.erro) return responder(res, 400, { erro: v.erro });
+            if (v.erro) return resp(400, { erro: v.erro });
             let id = corpo.id;
-            if (url.pathname === '/api/scripts/novo') {
+            if (caminho === '/api/scripts/novo') {
                 const base = (v.meta.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'script').slice(0, 40);
                 id = base;
                 for (let i = 2; SCRIPTS[id] || config.scriptsExtras.some(x => x.id === id) || id === 'painel' || id.startsWith('mod-'); i++) id = `${base}-${i}`;
                 config.scriptsExtras.push({ id, arquivo: `${id}.user.js` });
+                // O script novo fica ligado só no perfil em uso: cada perfil escolhe os seus.
+                for (const p of perfisApp.perfis) (p.scripts = p.scripts || {})[id] = false;
                 config.scripts[id] = true;
                 salvarConfig();
             } else if (!SCRIPTS[id]) {
-                return responder(res, 404, { erro: 'Script não encontrado.' });
+                return resp(404, { erro: 'Script não encontrado.' });
             }
             const arquivo = SCRIPTS[id]?.arquivo || config.scriptsExtras.find(x => x.id === id).arquivo;
             fs.writeFileSync(path.join(PASTA_SCRIPTS, arquivo), codigo);
             const falhas = await baixarRequires(v.meta);
             await recarregarScripts({ recarregarAbas: false });
-            log(`Script ${url.pathname.endsWith('novo') ? 'adicionado' : 'salvo'}: ${v.meta.name}`);
+            log(`Script ${caminho.endsWith('novo') ? 'adicionado' : 'salvo'}: ${v.meta.name}`);
             notificarHub();
-            return responder(res, 200, { ok: true, id, nome: v.meta.name, falhas });
+            return resp(200, { ok: true, id, nome: v.meta.name, falhas });
         }
 
         case '/api/scripts/remover': {
             const id = String(corpo.id || '');
             const sc = SCRIPTS[id];
-            if (!sc) return responder(res, 404, { erro: 'Script não encontrado.' });
+            if (!sc) return resp(404, { erro: 'Script não encontrado.' });
             // Primeiro desliga nas abas abertas (sem recarregar), depois tira da lista.
             await alternarAoVivo([id], false);
             if (sc.embutido) {
@@ -1196,12 +1375,13 @@ async function rota(req, res) {
                 const extra = config.scriptsExtras.find(x => x.id === id);
                 config.scriptsExtras = config.scriptsExtras.filter(x => x.id !== id);
                 delete config.scripts[id];
+                for (const p of perfisApp.perfis) delete p.scripts?.[id];
                 try { fs.renameSync(path.join(PASTA_SCRIPTS, extra.arquivo), path.join(PASTA_SCRIPTS, extra.arquivo + '.removido')); } catch {}
             }
             salvarConfig();
             await recarregarScripts({ recarregarAbas: false });
             notificarHub();
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
         }
 
         case '/api/scripts/restaurar-removidos': {
@@ -1210,51 +1390,99 @@ async function rota(req, res) {
             salvarConfig();
             await recarregarScripts({ recarregarAbas: false });
             notificarHub();
-            return responder(res, 200, { ok: true, n });
+            return resp(200, { ok: true, n });
         }
 
         case '/api/script':
         case '/api/scripts/todos': {
-            const ids = url.pathname === '/api/script'
+            const ids = caminho === '/api/script'
                 ? (SCRIPTS[corpo.id] ? [corpo.id] : [])
                 : Object.values(SCRIPTS).filter(x => !corpo.grupo || x.grupo === corpo.grupo).map(x => x.id);
-            if (!ids.length) return responder(res, 400, { erro: 'Script desconhecido' });
+            if (!ids.length) return resp(400, { erro: 'Script desconhecido' });
             for (const id of ids) config.scripts[id] = Boolean(corpo.ativo);
             salvarConfig();
             const aoVivo = await alternarAoVivo(ids, Boolean(corpo.ativo));
             notificarHub();
-            return responder(res, 200, { ok: true, aoVivo });
+            return resp(200, { ok: true, aoVivo });
+        }
+
+        case '/api/perfis-app/criar': {
+            const v = validarNomePerfil(corpo.nome);
+            if (v.erro) return resp(400, { erro: v.erro });
+            const cor = CORES_PERFIL.includes(corpo.cor) ? corpo.cor : CORES_PERFIL[0];
+            const perfil = criarPerfilApp(v.nome, cor, corpo.base);
+            notificarHub();
+            return resp(200, { ok: true, id: perfil.id });
+        }
+
+        case '/api/perfis-app/trocar': {
+            if (!perfisApp.perfis.some(p => p.id === corpo.id)) return resp(404, { erro: 'Perfil não encontrado.' });
+            const r = await trocarPerfilApp(corpo.id);
+            notificarHub();
+            return resp(200, { ok: true, aoVivo: r.aoVivo, nome: perfilAtivo().nome, ligados: scriptsLigados(config.scripts) });
+        }
+
+        case '/api/perfis-app/editar': {
+            const perfil = perfisApp.perfis.find(p => p.id === corpo.id);
+            if (!perfil) return resp(404, { erro: 'Perfil não encontrado.' });
+            const v = validarNomePerfil(corpo.nome, perfil.id);
+            if (v.erro) return resp(400, { erro: v.erro });
+            perfil.nome = v.nome;
+            if (CORES_PERFIL.includes(corpo.cor)) perfil.cor = corpo.cor;
+            salvarConfig();
+            notificarHub();
+            return resp(200, { ok: true });
+        }
+
+        case '/api/perfis-app/excluir': {
+            if (!perfisApp.perfis.some(p => p.id === corpo.id)) return resp(404, { erro: 'Perfil não encontrado.' });
+            if (perfisApp.perfis.length === 1) return resp(400, { erro: 'O último perfil não pode ser excluído.' });
+            await excluirPerfilApp(corpo.id);
+            notificarHub();
+            return resp(200, { ok: true });
+        }
+
+        case '/api/perfis-app/exportar': {
+            if (!perfisApp.perfis.some(p => p.id === corpo.id)) return resp(404, { erro: 'Perfil não encontrado.' });
+            return resp(200, { ok: true, dados: exportarPerfilApp(corpo.id) });
+        }
+
+        case '/api/perfis-app/importar': {
+            const r = await importarPerfilApp(corpo.dados);
+            if (r.erro) return resp(400, { erro: r.erro });
+            notificarHub();
+            return resp(200, { ok: true, ...r });
         }
 
         case '/api/abrir': {
             const site = corpo.site;
-            if (!SITES[site]) return responder(res, 400, { erro: 'Site desconhecido' });
+            if (!SITES[site]) return resp(400, { erro: 'Site desconhecido' });
             const perfil = perfisDe(site).includes(corpo.perfil) ? corpo.perfil : null;
-            if (!perfil) return responder(res, 400, { erro: 'Perfil desconhecido' });
+            if (!perfil) return resp(400, { erro: 'Perfil desconhecido' });
             try {
                 const r = await abrirNoEdge(SITES[site], perfil);
-                if (!r.ok) return responder(res, 400, { erro: r.erro });
+                if (!r.ok) return resp(400, { erro: r.erro });
                 notificarHub();
-                return responder(res, 200, r);
+                return resp(200, r);
             } catch (e) {
-                return responder(res, 500, { erro: e.message });
+                return resp(500, { erro: e.message });
             }
         }
 
         case '/api/perfil/adicionar': {
             limparCachePerfis();
             const nome = String(corpo.nome || '').trim();
-            if (!nome) return responder(res, 400, { erro: `Digite o nome do perfil, igual aparece no ${nav().nome}.` });
+            if (!nome) return resp(400, { erro: `Digite o nome do perfil, igual aparece no ${nav().nome}.` });
             const doEdge = lerPerfisDe(nav().dados).find(p => bate(p, nome));
             const doPainel = lerPerfisDe(nav().copia).find(p => bate(p, nome));
             const origem = doEdge || doPainel;
             if (!origem) {
                 const nomes = [...new Set([...lerPerfisDe(nav().dados), ...lerPerfisDe(nav().copia)].map(p => p.nome))];
-                return responder(res, 400, { erro: `Não achei o perfil "${nome}". Se você acabou de criar ou renomear, feche e abra o ${nav().nome} uma vez para ele salvar. Perfis encontrados: ${nomes.join(', ') || 'nenhum'}.` });
+                return resp(400, { erro: `Não achei o perfil "${nome}". Se você acabou de criar ou renomear, feche e abra o ${nav().nome} uma vez para ele salvar. Perfis encontrados: ${nomes.join(', ') || 'nenhum'}.` });
             }
             const site = LISTAS[corpo.site] ? corpo.site : 'smartbus';
             if (perfisDe(site).some(n => chaveNome(n) === chaveNome(origem.nome))) {
-                return responder(res, 400, { erro: `O perfil "${origem.nome}" já está nessa lista.` });
+                return resp(400, { erro: `O perfil "${origem.nome}" já está nessa lista.` });
             }
             definirPerfis(site, [...perfisDe(site), origem.nome]);
             let aviso = '';
@@ -1263,14 +1491,13 @@ async function rota(req, res) {
                 if (r.pulados) aviso = ' Alguns arquivos estavam em uso; se pedir login, entre uma vez nesse perfil.';
             }
             notificarHub();
-            return responder(res, 200, { ok: true, nome: origem.nome, aviso });
+            return resp(200, { ok: true, nome: origem.nome, aviso });
         }
 
         case '/api/perfis/escanear': {
             limparCachePerfis();
             const site = LISTAS[corpo.site] ? corpo.site : 'smartbus';
-            // Na SmartBus, o perfil "Gilmario" (da Tallos) fica de fora.
-            const achados = todosPerfis().filter(p => site !== 'smartbus' || !bate(p, PERFIL_TALLOS));
+            const achados = todosPerfis();
             definirPerfis(site, achados.map(p => p.nome));
             let pulados = 0;
             if (copiaPronta()) {
@@ -1281,68 +1508,44 @@ async function rota(req, res) {
                 }
             }
             notificarHub();
-            return responder(res, 200, { ok: true, nomes: perfisDe(site), pulados });
+            return resp(200, { ok: true, nomes: perfisDe(site), pulados });
         }
 
         case '/api/perfil/remover': {
             const nome = String(corpo.nome || '');
             const site = LISTAS[corpo.site] ? corpo.site : 'smartbus';
-            if (!perfisDe(site).includes(nome)) return responder(res, 400, { erro: 'Esse perfil não está nessa lista.' });
+            if (!perfisDe(site).includes(nome)) return resp(400, { erro: 'Esse perfil não está nessa lista.' });
             definirPerfis(site, perfisDe(site).filter(n => n !== nome));
             notificarHub();
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
         }
 
         case '/api/copiar-perfis': {
             const r = await copiarPerfis({ fecharEdge: Boolean(corpo.fecharEdge) });
-            return responder(res, r.ok || r.precisaFechar ? 200 : 400, r);
+            return resp(r.ok || r.precisaFechar ? 200 : 400, r);
         }
 
         case '/api/recarregar-scripts':
             await recarregarScripts();
             notificarHub();
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
 
         case '/api/pasta':
             abrirPasta(PASTA_SCRIPTS);
-            return responder(res, 200, { ok: true });
+            return resp(200, { ok: true });
 
         default:
-            return responder(res, 404, { erro: 'Não encontrado' });
+            return resp(404, { erro: 'Não encontrado' });
     }
 }
 
-// Confere se o hub apareceu de verdade. Se em alguns segundos nenhuma janela do hub
-// se conectar, abre o hub numa aba do Edge do Painel ou, sem ele, no navegador padrão.
-function abrirNoNavegadorPadrao(url) {
-    try {
-        if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-        else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
-    } catch {}
-}
+// ---------- Versão antiga ----------
+// A 6.x fica no ar pela porta 47321 e também injeta scripts: precisa sair antes da 7 começar.
+const URL_ANTIGA = 'http://127.0.0.1:47321/';
 
-async function garantirHubVisivel(segundos = 12) {
-    for (let i = 0; i < segundos * 2; i++) {
-        if (clientesSSE.size > 0) return;
-        await sleep(500);
-    }
-    log('A janela do hub não apareceu. Abrindo o hub de outro jeito...');
-    if (browser?.connected) {
-        try {
-            const page = await browser.newPage();
-            await page.goto(HUB_URL);
-            await page.bringToFront();
-            await sleep(3000);
-            if (clientesSSE.size > 0) return;
-        } catch {}
-    }
-    abrirNoNavegadorPadrao(HUB_URL);
-}
-
-// ---------- Outra cópia já aberta? ----------
-function outraInstanciaAberta() {
+function versaoAntigaAberta() {
     return new Promise(resolve => {
-        const req = http.get(HUB_URL + 'api/ping', { timeout: 800 }, res => {
+        const req = http.get(URL_ANTIGA + 'api/ping', { timeout: 800 }, res => {
             let b = '';
             res.on('data', c => { b += c; });
             res.on('end', () => { try { resolve(JSON.parse(b).app === 'painel-de-scripts'); } catch { resolve(false); } });
@@ -1352,171 +1555,28 @@ function outraInstanciaAberta() {
     });
 }
 
-function pedirHubDaOutra() {
-    return new Promise(resolve => {
-        const req = http.request(HUB_URL + 'api/mostrar-hub', {
-            method: 'POST', headers: { 'X-Painel': '1', 'Content-Type': 'application/json' }, timeout: 20000
-        }, res => { res.resume(); res.on('end', resolve); });
-        req.on('error', resolve);
-        req.end('{}');
-    });
-}
-
-// ---------- Instalação (como um app do Windows) ----------
-const PASTA_APP = path.join(BASE, 'app');
-const EXE_APP = path.join(PASTA_APP, 'PainelDeScripts.exe');
-const ARQ_ICONE = path.join(PASTA_APP, 'painel.ico');
-const PASTA_ATUALIZACAO = path.join(BASE, 'atualizacao');
-const ARG_ATUALIZACAO = '--atualizacao';
-const veioDeAtualizacao = process.argv.includes(ARG_ATUALIZACAO);
-let versaoEncontrada = null;
-let instalandoVersao = false;
-const CHAVE_DESINSTALAR = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PainelDeScripts';
-const ehExe = () => Boolean(process.pkg) && process.platform === 'win32';
-const mesmoArquivo = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
-
-function powershell(script) {
-    return new Promise(resolve => {
-        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-            { windowsHide: true }, err => { if (err) log('PowerShell:', err.message); resolve(!err); });
-    });
-}
-
-const aspasPs = t => `'${String(t).replace(/'/g, "''")}'`;
-
-// Atalhos no Menu Iniciar e na Área de Trabalho, com ícone, e o registro em "Aplicativos instalados".
-function registrarApp() {
-    if (process.env.PAINEL_SEM_ATALHOS) return Promise.resolve(true);
-    try { fs.writeFileSync(ARQ_ICONE, ICONE_ICO); } catch {}
-    const atalho = destino => [
-        `$a = $sh.CreateShortcut(${destino})`,
-        `$a.TargetPath = ${aspasPs(EXE_APP)}`,
-        `$a.WorkingDirectory = ${aspasPs(PASTA_APP)}`,
-        `$a.IconLocation = ${aspasPs(ARQ_ICONE + ',0')}`,
-        `$a.Description = 'Painel de Scripts — SmartBus e Tallos'`,
-        '$a.Save()'
-    ].join('; ');
-    return powershell([
-        "$ProgressPreference = 'SilentlyContinue'",
-        '$sh = New-Object -ComObject WScript.Shell',
-        atalho(`(Join-Path ([Environment]::GetFolderPath('Programs')) 'Painel de Scripts.lnk')`),
-        atalho(`(Join-Path ([Environment]::GetFolderPath('Desktop')) 'Painel de Scripts.lnk')`),
-        `$k = ${aspasPs(CHAVE_DESINSTALAR)}`,
-        'New-Item -Path $k -Force | Out-Null',
-        `Set-ItemProperty -Path $k -Name DisplayName -Value 'Painel de Scripts'`,
-        `Set-ItemProperty -Path $k -Name DisplayVersion -Value ${aspasPs(VERSAO)}`,
-        `Set-ItemProperty -Path $k -Name Publisher -Value 'Gilmario'`,
-        `Set-ItemProperty -Path $k -Name DisplayIcon -Value ${aspasPs(ARQ_ICONE)}`,
-        `Set-ItemProperty -Path $k -Name InstallLocation -Value ${aspasPs(PASTA_APP)}`,
-        `Set-ItemProperty -Path $k -Name UninstallString -Value ${aspasPs('"' + EXE_APP + '" --desinstalar')}`,
-        'Set-ItemProperty -Path $k -Name NoModify -Value 1 -Type DWord',
-        'Set-ItemProperty -Path $k -Name NoRepair -Value 1 -Type DWord'
-    ].join('\n'));
-}
-
-async function pararOutraInstancia() {
-    if (!(await outraInstanciaAberta())) return;
+async function fecharVersaoAntiga() {
+    if (!(await versaoAntigaAberta())) return;
+    log('Fechando a versão antiga do Painel, que estava aberta.');
     await new Promise(resolve => {
-        const req = http.request(HUB_URL + 'api/sair', {
+        const req = http.request(URL_ANTIGA + 'api/sair', {
             method: 'POST', headers: { 'X-Painel': '1', 'Content-Type': 'application/json' }, timeout: 3000
         }, res => { res.resume(); res.on('end', resolve); });
         req.on('error', resolve);
         req.end('{}');
     });
-    for (let i = 0; i < 20 && await outraInstanciaAberta(); i++) await sleep(300);
-    // Versões antigas (com a janela preta) não sabem se fechar sozinhas.
-    for (let tentativa = 0; tentativa < 3 && await outraInstanciaAberta(); tentativa++) {
-        await caixaMensagem('Uma versão antiga do Painel de Scripts está aberta.\n\nFeche a janela preta do Painel (ou o programa antigo) e depois clique em OK.', { icone: 'Warning' });
-        for (let i = 0; i < 10 && await outraInstanciaAberta(); i++) await sleep(300);
-    }
-    await sleep(500);
-}
-
-function iniciarApp(args = []) {
-    return abrirExe(EXE_APP, args, { cwd: PASTA_APP });
-}
-
-async function desinstalar() {
-    const apagarDados = await caixaMensagem(
-        'Remover o Painel de Scripts deste computador?\n\nClique em Sim para apagar também as configurações e as cópias dos perfis.\nClique em Não para manter essas informações (útil se for instalar de novo).',
-        { simNao: true, icone: 'Question' });
-    await pararOutraInstancia();
-    await powershell([
-        "$ProgressPreference = 'SilentlyContinue'",
-        `Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Programs')) 'Painel de Scripts.lnk')`,
-        `Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Painel de Scripts.lnk')`,
-        `Remove-Item -Recurse -Force -ErrorAction SilentlyContinue ${aspasPs(CHAVE_DESINSTALAR)}`
-    ].join('\n'));
-    // O exe não consegue apagar a si mesmo enquanto roda: um cmd escondido apaga depois.
-    const alvo = apagarDados ? BASE : PASTA_APP;
-    spawn('cmd.exe', ['/c', `ping -n 4 127.0.0.1 >nul & rmdir /s /q "${alvo}"`],
-        { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-    await caixaMensagem('O Painel de Scripts foi removido.');
-    process.exit(0);
-}
-
-// Retorna true quando este processo deve parar aqui (instalou/atualizou e abriu a cópia instalada).
-async function cuidarDaInstalacao() {
-    if (!ehExe()) return false;
-    if (process.argv.includes('--desinstalar')) { await desinstalar(); return true; }
-    if (mesmoArquivo(process.execPath, EXE_APP)) {
-        if (!fs.existsSync(ARQ_ICONE)) registrarApp().catch(() => {});
-        // O exe baixado acabou de se fechar: dá um tempo para o Windows soltar o arquivo.
-        setTimeout(() => fs.promises.rm(PASTA_ATUALIZACAO, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 }).catch(() => {}), 3000);
-        return false;
-    }
-    // Rodando de fora da pasta do app (ex.: Downloads): instala ou atualiza.
-    const atual = fs.readFileSync(process.execPath);
-    let igual = false;
-    try { igual = fs.statSync(EXE_APP).size === atual.length && sha(fs.readFileSync(EXE_APP)) === sha(atual); } catch {}
-    const novo = !fs.existsSync(EXE_APP);
-    if (!igual) {
-        await pararOutraInstancia();
-        fs.mkdirSync(PASTA_APP, { recursive: true });
-        // Grava uma vez só: regravar a cada tentativa faz o antivírus examinar o arquivo de novo.
-        let ok = false, erro = null;
-        try { fs.writeFileSync(EXE_APP + '.novo', atual); } catch (e) { erro = e; }
-        for (let i = 0; i < 120 && !ok && !(erro && i === 0); i++) {
-            try { fs.renameSync(EXE_APP + '.novo', EXE_APP); ok = true; }
-            catch (e) { erro = e; await sleep(1000); }
-        }
-        if (!ok) {
-            log('Falha ao trocar o exe:', erro?.code || '', erro?.message || '');
-            if (!novo) await iniciarApp().catch(e => log('Falha ao reabrir o Painel:', e.message));
-            await sairComPausa('Não consegui instalar o Painel (o arquivo antigo está em uso). Feche o Painel e tente de novo.');
-            return true;
-        }
-        log(novo ? `Instalado em ${PASTA_APP}.` : `Atualizado para a versão ${VERSAO}.`);
-    }
-    await registrarApp();
-    try {
-        await iniciarApp(veioDeAtualizacao ? [ARG_ATUALIZACAO] : []);
-    } catch (e) {
-        await sairComPausa(`Não consegui abrir o Painel (${e.code || e.message}). Abra pelo atalho na Área de Trabalho.`);
-        return true;
-    }
-    if (novo) {
-        await caixaMensagem('O Painel de Scripts foi instalado.\n\nPara abrir das próximas vezes, use o atalho "Painel de Scripts" na Área de Trabalho ou no Menu Iniciar. Pode apagar o arquivo baixado.');
-    }
-    process.exit(0);
-    return true;
+    for (let i = 0; i < 20 && await versaoAntigaAberta(); i++) await sleep(300);
 }
 
 // ---------- Início ----------
-(async () => {
-    process.title = 'Painel de Scripts';
+async function iniciar(novosGanchos) {
+    ganchos = novosGanchos;
     log(`Painel de Scripts ${VERSAO} iniciando.`);
-    if (await cuidarDaInstalacao()) return;
-
-    if (await outraInstanciaAberta()) {
-        log('O Painel já está aberto. Mostrando o hub...');
-        await pedirHubDaOutra();
-        process.exit(0);
-    }
+    await fecharVersaoAntiga();
 
     if (!acharNavegador()) {
         const outro = Object.values(NAVEGADORES).find(n => acharNavegador(n));
-        if (!outro) return sairComPausa('Nem o Edge nem o Chrome foram encontrados neste computador.');
+        if (!outro) throw new Error('Nem o Edge nem o Chrome foram encontrados neste computador.');
         log(`${nav().nome} não encontrado. Usando o ${outro.nome}.`);
         config.navegador = outro.id;
         salvarConfig();
@@ -1526,64 +1586,31 @@ async function cuidarDaInstalacao() {
     montarCodigo();
     log(`Script em ${PASTA_SCRIPTS}`);
 
-    const servidor = http.createServer((req, res) => {
-        rota(req, res).catch(e => { try { responder(res, 500, { erro: e.message }); } catch {} });
-    });
-    try {
-        await new Promise((resolve, reject) => {
-            servidor.once('error', reject);
-            servidor.listen(PORTA, '127.0.0.1', resolve);
-        });
-    } catch (e) {
-        return sairComPausa(`Não consegui abrir o hub na porta ${PORTA}: ${e.message}`);
-    }
+    await conectarEdge().catch(() => {});
 
-    log(`Hub em ${HUB_URL}`);
-
-    // Abre o hub. Com a cópia dos perfis pronta, abre no Edge do Painel;
-    // senão, abre no Edge normal para o primeiro passo (copiar os perfis).
-    // Depois de uma atualização, a janela do hub continua aberta e reconecta sozinha.
-    if (veioDeAtualizacao) {
-        log(`Atualizado para a versão ${VERSAO}.`);
-    } else if (copiaPronta()) {
-        const r = await abrirNoEdge(HUB_URL, perfilDoHub(), { app: true })
-            .catch(e => ({ ok: false, erro: e.message }));
-        log(r?.ok ? 'Pronto! Use o hub para abrir a Tallos e a SmartBus.' : `Atenção: ${r?.erro}`);
-        // "Abrir sozinho ao iniciar": abre a Tallos e a SmartBus em todos os perfis cadastrados.
-        // Se uma aba já estiver aberta naquele perfil, ela não é aberta de novo.
-        if (r?.ok && config.abrirAoIniciar) abrirTodos().catch(e => log('Falha ao abrir as abas:', e.message));
-    } else {
-        executarEdge([`--app=${HUB_URL}`], { doPainel: false });
-        log(`Primeiro uso: no hub, clique em "Copiar perfis do ${nav().nome}".`);
-    }
-
-    garantirHubVisivel(copiaPronta() ? 30 : 12).catch(() => {});
+    // "Abrir sozinho ao iniciar": abre a Tallos e a SmartBus em todos os perfis cadastrados.
+    // Se uma aba já estiver aberta naquele perfil, ela não é aberta de novo.
+    if (copiaPronta() && config.abrirAoIniciar) abrirTodos().catch(e => log('Falha ao abrir as abas:', e.message));
+    if (!copiaPronta()) log(`Primeiro uso: no hub, clique em "Copiar perfis do ${nav().nome}".`);
 
     // Tenta reconectar sozinho se o Edge for aberto pela porta depois.
     setInterval(() => { if (!browser) conectarEdge().catch(() => {}); }, 4000);
     setInterval(() => { for (const p of paginas) injetarSeFaltar(p); }, 8000);
     setInterval(notificarHub, 10000);
+    // Confirma de verdade que a conexão ainda responde (pega o caso de conexão "zumbi" depois
+    // de uma ausência longa, que não dispara 'disconnected' por conta própria).
+    setInterval(() => { verificarVivo().catch(() => {}); }, 30000);
+}
 
-    // Sem janela preta: quando o hub e o navegador do Painel ficam fechados por um tempo,
-    // o Painel se fecha sozinho (abrir o atalho de novo liga tudo outra vez).
-    const podeFechar = criarVigiaOcioso({
-        limite: 3 * 60 * 1000,
-        salto: 60 * 1000,
-        emUso: () => clientesSSE.size > 0 || Boolean(browser?.connected) || copia.rodando
-    });
-    setInterval(() => {
-        if (podeFechar()) {
-            log('Hub e navegador fechados há 3 minutos. Fechando o Painel.');
-            if (timerSalvar) salvarAgora();
-            process.exit(0);
-        }
-    }, 15000);
-})().catch(e => sairComPausa('Erro ao iniciar: ' + (e?.message || e)));
+// Chamado pelo processo principal quando o Windows acorda de suspensão/tela bloqueada: a
+// ausência pode ter deixado a conexão zumbi, então confirma na hora em vez de esperar o próximo
+// tique do heartbeat.
+function aoRetomar() {
+    verificarVivo().catch(() => {});
+}
 
-process.on('uncaughtException', e => {
-    log('Erro inesperado, fechando o Painel:', e?.stack || String(e));
-    process.exit(1);
-});
-process.on('unhandledRejection', e => log('Erro não tratado:', e?.stack || String(e)));
-process.on('exit', () => { if (timerSalvar) salvarAgora(); });
-process.on('SIGINT', () => process.exit(0));
+function salvarPendente() {
+    if (timerSalvar) salvarAgora();
+}
+
+module.exports = { iniciar, tratarApi, salvarPendente, log, aoRetomar };

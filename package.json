@@ -1,23 +1,58 @@
 {
   "name": "painel-de-scripts",
-  "version": "6.5.7",
+  "version": "1.0.5",
   "private": true,
-  "main": "dist/painel.js",
-  "bin": "dist/painel.js",
+  "main": "dist/principal/index.js",
   "scripts": {
-    "test": "node --test \"tests/*.test.js\"",
-    "build": "esbuild src/app.js --bundle --platform=node --target=node20 --outfile=dist/painel.js --loader:.txt=text --loader:.html=text --loader:.ico=binary --loader:.png=binary --external:bufferutil --external:utf-8-validate",
-    "empacotar": "pkg dist/painel.js -t node22-win-x64 --no-bytecode --public --public-packages \"*\" -o out/PainelDeScripts.exe && node patch-gui.js out/PainelDeScripts.exe"
-  },
-  "dependencies": {
-    "puppeteer-core": "^23.11.1"
+    "gerar": "node gerar-modulos.js",
+    "build": "esbuild src/principal/index.js src/preload/index.js --bundle --platform=node --target=node20 --outbase=src --outdir=dist --external:electron --loader:.txt=text --loader:.html=text --loader:.ico=binary --loader:.png=binary --external:bufferutil --external:utf-8-validate",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win",
+    "publicar": "node publicar.js"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "^6.25.0",
     "codemirror": "^5.65.16",
+    "electron": "^45.2.2",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.24.0",
     "eslint-scope": "^9.1.2",
     "espree": "^11.2.0",
-    "globals": "^17.13.0"
+    "globals": "^17.13.0",
+    "puppeteer-core": "^23.11.1"
+  },
+  "description": "Painel de Scripts - SmartBus e Tallos",
+  "author": "Gilmario",
+  "build": {
+    "appId": "com.gilmario.paineldescripts",
+    "productName": "Painel de Scripts",
+    "directories": {
+      "output": "out"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "src/icone/painel.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/instalador.nsh",
+      "artifactName": "PainelDeScripts-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "gilvan0019",
+        "repo": "vale-viagens",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
   }
 }
