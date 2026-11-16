@@ -407,9 +407,9 @@ button.carimbo:hover{background:var(--papel)}
         <div id="pf-base-campo">
           <label for="pf-base">Começar com</label>
           <select class="input" id="pf-base">
-            <option value="copiar" id="pf-base-copiar">Os mesmos scripts do perfil atual</option>
-            <option value="vazio">Nenhum script ligado</option>
-            <option value="todos">Todos os scripts ligados</option>
+            <option value="vazio">Só os módulos do app, nenhum ligado</option>
+            <option value="todos">Só os módulos do app, todos ligados</option>
+            <option value="copiar" id="pf-base-copiar">Uma cópia dos scripts do perfil atual</option>
           </select>
         </div>
       </div>
@@ -509,7 +509,9 @@ button.carimbo:hover{background:var(--papel)}
   function renderBarra() {
     const ed = E.edge;
     $('#pasta').textContent = E.pasta;
+    if (E.avisoMigracao && !avisouMigracao) { avisouMigracao = true; avisar(E.avisoMigracao, 'erro'); }
   }
+  let avisouMigracao = false;
 
   const NV = () => (E && E.edge && E.edge.nomeNavegador) || 'Edge';
   const abrindo = new Set();
@@ -1039,7 +1041,8 @@ button.carimbo:hover{background:var(--papel)}
     try {
       const r = await api('/api/perfis-app/trocar', { id });
       const msg = `Perfil ${r.nome}: ${textoScripts(r.ligados)}`;
-      if (r.aoVivo) avisar(msg + '.');
+      if (r.recarregou) avisar(msg + '. As abas recarregaram com os scripts deste perfil.');
+      else if (r.aoVivo) avisar(msg + '.');
       else avisar(msg + '. Recarregue as abas para aplicar.', 'ok', { texto: 'Recarregar abas', acao: recarregarAbas });
     } catch (e) { avisar(e.message, 'erro'); }
     atualizar();
@@ -1056,8 +1059,8 @@ button.carimbo:hover{background:var(--papel)}
     $('#pf-titulo').textContent = perfil ? 'Editar perfil' : 'Novo perfil';
     $('#pf-nome').value = perfil ? perfil.nome : '';
     $('#pf-erro').textContent = '';
-    $('#pf-base').value = 'copiar';
-    $('#pf-base-copiar').textContent = 'Os mesmos scripts de ' + lista.find(p => p.id === ativo).nome;
+    $('#pf-base').value = 'vazio';
+    $('#pf-base-copiar').textContent = 'Uma cópia dos scripts de ' + lista.find(p => p.id === ativo).nome;
     $('#pf-base-campo').hidden = Boolean(perfil);
     desenharCores();
     menuPerfis(false);

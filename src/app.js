@@ -11,6 +11,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const puppeteer = require('puppeteer-core');
+const scriptsPerfil = require('./scriptsPerfil');
 
 const PONTE = require('./ponte.txt');
 const RUNTIME = require('./runtime.txt');
@@ -95,9 +96,12 @@ const salvarConfig = () => {
 
 // ---------- Perfis do app (troca de login) ----------
 // Cada perfil guarda estes campos da configuração. O perfil ativo fica carregado em "config"
-// e o resto do app continua lendo só de lá. O código dos scripts é o mesmo para todos os perfis.
+// e o resto do app continua lendo só de lá. Cada perfil também tem a própria pasta de scripts.
 const ARQ_PERFIS = path.join(BASE, 'perfis.json');
-const CAMPOS_DO_PERFIL = ['scripts', 'navegador', 'abrirAoIniciar', 'perfisSmartbus', 'perfisTallos', 'perfisSmartbus_chrome', 'perfisTallos_chrome'];
+const CAMPOS_SCRIPTS = ['scriptsExtras', 'modulosRemovidos', 'hashes'];
+const CAMPOS_DO_PERFIL = ['scripts', 'navegador', 'abrirAoIniciar', 'perfisSmartbus', 'perfisTallos', 'perfisSmartbus_chrome', 'perfisTallos_chrome', ...CAMPOS_SCRIPTS];
+// perfis.json com formatoScripts 2: os scripts já estão nas pastas dos perfis.
+const FORMATO_SCRIPTS = 2;
 const CORES_PERFIL = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 function copiarCamposDoPerfil(de, para) {
@@ -129,10 +133,21 @@ function carregarPerfisApp() {
 const perfisApp = carregarPerfisApp();
 const perfilAtivo = () => perfisApp.perfis.find(p => p.id === perfisApp.ativo);
 if (!perfilAtivo()) perfisApp.ativo = perfisApp.perfis[0].id;
+// Antes da 1.1.0 as listas de scripts eram uma só, no config.json. Até a migração dos
+// arquivos (em prepararArquivosScripts), cada perfil recebe uma cópia delas.
+const migracaoPendente = perfisApp.formatoScripts !== FORMATO_SCRIPTS;
+if (migracaoPendente) {
+    for (const p of perfisApp.perfis) for (const c of CAMPOS_SCRIPTS) p[c] = JSON.parse(JSON.stringify(config[c]));
+}
 copiarCamposDoPerfil(perfilAtivo(), config);
-config.scripts = config.scripts || {};
+scriptsPerfil.normalizar(config);
 
-const PASTA_MODULOS = path.join(PASTA_SCRIPTS, 'modulos');
+// Se a separação por perfil falhou, o app segue com a pasta antiga até a próxima abertura.
+let usarPastaAntiga = false;
+const pastaScripts = (id = perfisApp.ativo) => usarPastaAntiga ? PASTA_SCRIPTS : scriptsPerfil.pastaDoPerfil(PASTA_SCRIPTS, id);
+const pastaModulos = (id = perfisApp.ativo) => path.join(pastaScripts(id), 'modulos');
+// Estado de scripts de um perfil: o ativo vive em "config"; os outros, no próprio perfil.
+const estadoDoPerfil = p => scriptsPerfil.normalizar(p.id === perfisApp.ativo ? config : p);
 
 // Grava os módulos que vêm com o app na pasta. Se o arquivo em disco é uma versão
 // antiga sem edição, troca pela nova; se você editou, mantém a sua versão.
@@ -144,27 +159,35 @@ const MODULOS_RETIRADOS = ['mod-leitor_documento', 'mod-idade_nascimento', 'mod-
     'mod-tallos_ocultar_botoes_barra', 'mod-chatpro_copiar_2'];
 
 function prepararArquivosScripts() {
-    fs.mkdirSync(PASTA_MODULOS, { recursive: true });
-    for (const id of MODULOS_RETIRADOS) {
-        try { fs.rmSync(path.join(PASTA_MODULOS, id + '.user.js'), { force: true }); } catch {}
-        delete config.scripts[id];
-        delete config.hashes[id];
-    }
-    config.modulosRemovidos = config.modulosRemovidos.filter(id => !MODULOS_RETIRADOS.includes(id));
-    for (const e of EMBUTIDOS) {
-        const arq = path.join(PASTA_MODULOS, e.arquivo);
-        const hNovo = sha(e.fonte);
-        if (!fs.existsSync(arq)) {
-            fs.writeFileSync(arq, e.fonte);
-        } else {
-            const hDisco = sha(fs.readFileSync(arq, 'utf8'));
-            if (hDisco !== hNovo && hDisco === config.hashes[e.id]) fs.writeFileSync(arq, e.fonte);
-        }
-        config.hashes[e.id] = hNovo;
-    }
-    migrarPainelUnificado();
+    if (migracaoPendente && perfisApp.formatoScripts !== FORMATO_SCRIPTS) migrarScriptsParaPerfis();
+    for (const p of usarPastaAntiga ? [perfilAtivo()] : perfisApp.perfis) prepararModulosDoPerfil(p);
     salvarConfig();
 }
+
+function prepararModulosDoPerfil(p) {
+    scriptsPerfil.prepararModulos({ pasta: pastaModulos(p.id), embutidos: EMBUTIDOS, retirados: MODULOS_RETIRADOS, estado: estadoDoPerfil(p) });
+}
+
+// Primeira abertura da 1.1.0: os scripts da pasta única vão para a pasta de cada perfil.
+// Se falhar, nada é apagado: a pasta antiga continua igual e a migração é refeita depois.
+function migrarScriptsParaPerfis() {
+    migrarPainelUnificado();
+    salvarConfig();
+    const legado = { scriptsExtras: config.scriptsExtras, modulosRemovidos: config.modulosRemovidos, hashes: config.hashes };
+    try {
+        const r = scriptsPerfil.migrarParaPerfis({ pastaScripts: PASTA_SCRIPTS, perfis: perfisApp.perfis, legado });
+        copiarCamposDoPerfil(perfilAtivo(), config);
+        scriptsPerfil.normalizar(config);
+        perfisApp.formatoScripts = FORMATO_SCRIPTS;
+        salvarConfig();
+        log(`Scripts separados por perfil: ${r.perfis} perfis, ${r.itens} itens copiados. A pasta antiga ficou em ${scriptsPerfil.NOME_BACKUP}.`);
+    } catch (e) {
+        usarPastaAntiga = true;
+        avisoMigracao = `Não consegui separar os scripts por perfil (${e.message}). Os scripts antigos continuam em ${PASTA_SCRIPTS}. Feche o Painel e abra de novo.`;
+        log('Falha ao separar os scripts por perfil:', e.message);
+    }
+}
+let avisoMigracao = '';
 
 // Versões anteriores tinham tudo num script só ("painel"). Passa o liga/desliga de cada
 // módulo para o novo script dele. Se o script unificado tinha sido editado, ele fica
@@ -321,15 +344,21 @@ function grupoDoScript(meta) {
 }
 
 function carregarListaScripts() {
+    SCRIPTS = listarScripts(config, pastaScripts());
+}
+
+// Lê os scripts de um perfil (estado = listas dele, pasta = pasta dele).
+function listarScripts(estado, pasta) {
+    scriptsPerfil.normalizar(estado);
     const lista = [
-        ...EMBUTIDOS.filter(e => !config.modulosRemovidos.includes(e.id))
+        ...EMBUTIDOS.filter(e => !estado.modulosRemovidos.includes(e.id))
             .map(e => ({ id: e.id, arquivo: path.join('modulos', e.arquivo), embutido: true, defaultOn: e.defaultOn })),
-        ...config.scriptsExtras
+        ...estado.scriptsExtras
     ];
     const novos = {};
     for (const item of lista) {
         let fonte = '';
-        try { fonte = fs.readFileSync(path.join(PASTA_SCRIPTS, item.arquivo), 'utf8'); }
+        try { fonte = fs.readFileSync(path.join(pasta, item.arquivo), 'utf8'); }
         catch (e) { log(`Não li ${item.arquivo}:`, e.message); continue; }
         const { meta } = lerCabecalho(fonte);
         novos[item.id] = {
@@ -344,9 +373,9 @@ function carregarListaScripts() {
             fonte,
             editado: Boolean(item.embutido) && sha(fonte) !== sha(embutidoPorId(item.id)?.fonte || '')
         };
-        if (config.scripts[item.id] === undefined) config.scripts[item.id] = item.embutido ? item.defaultOn !== false : true;
+        if (estado.scripts[item.id] === undefined) estado.scripts[item.id] = item.embutido ? item.defaultOn !== false : true;
     }
-    SCRIPTS = novos;
+    return novos;
 }
 
 let CODIGO = '';
@@ -1056,30 +1085,38 @@ function validarNomePerfil(bruto, idAtual) {
     return { nome };
 }
 
-const scriptsLigados = scripts => Object.keys(SCRIPTS).filter(id => scripts?.[id]).length;
+const scriptsLigados = estado => scriptsPerfil.idsDoPerfil(estado, EMBUTIDOS).filter(id => estado.scripts?.[id]).length;
 
+// base "copiar": cópia dos scripts do perfil em uso (arquivos e liga/desliga).
+// base "vazio" ou "todos": só os módulos do app, nenhum ou todos ligados.
 function criarPerfilApp(nome, cor, base) {
     const perfil = montarPerfilApp(nome, cor, config);
-    if (base === 'vazio' || base === 'todos') {
-        perfil.scripts = {};
-        for (const id of [...EMBUTIDOS.map(e => e.id), ...Object.keys(SCRIPTS)]) perfil.scripts[id] = base === 'todos';
+    if (base === 'copiar') {
+        scriptsPerfil.copiarPastaDoPerfil(PASTA_SCRIPTS, perfisApp.ativo, perfil.id);
+    } else {
+        Object.assign(perfil, scriptsPerfil.estadoVazio());
+        perfil.scripts = Object.fromEntries(EMBUTIDOS.map(e => [e.id, base === 'todos']));
     }
     perfisApp.perfis.push(perfil);
+    prepararModulosDoPerfil(perfil);
     salvarConfig();
     log(`Perfil criado: ${nome}.`);
     return perfil;
 }
 
-// Troca o perfil sem fechar nada: só o que mudou de estado é ligado ou desligado nas abas abertas.
+// Troca o perfil sem fechar nada: o que mudou de estado é ligado ou desligado nas abas abertas.
+// Cada perfil tem os próprios scripts: se um script ligado tem código diferente no perfil novo,
+// as abas de trabalho recarregam para rodar a versão nova.
 async function trocarPerfilApp(id) {
     const novo = perfisApp.perfis.find(p => p.id === id);
     if (id === perfisApp.ativo) return { aoVivo: true };
     salvarConfig();
     const antes = config.scripts;
+    const fonteAntes = Object.fromEntries(Object.values(SCRIPTS).map(s => [s.id, s.fonte]));
     const navAntes = nav().id;
     perfisApp.ativo = id;
     copiarCamposDoPerfil(novo, config);
-    config.scripts = config.scripts || {};
+    scriptsPerfil.normalizar(config);
     if (!acharNavegador()) config.navegador = navAntes;
     limparCachePerfis();
     carregarListaScripts();
@@ -1089,14 +1126,24 @@ async function trocarPerfilApp(id) {
     let aoVivo = true;
     if (nav().id !== navAntes) {
         soltarNavegador();
+        montarCodigo();
         if (copiaPronta()) conectarEdge().catch(() => {});
-    } else {
-        const ids = Object.keys(SCRIPTS);
-        const desligar = ids.filter(i => antes[i] && !config.scripts[i]);
-        const ligar = ids.filter(i => !antes[i] && config.scripts[i]);
-        if (desligar.length) aoVivo = await alternarAoVivo(desligar, false);
-        if (ligar.length) aoVivo = await alternarAoVivo(ligar, true) && aoVivo;
+        return { aoVivo };
     }
+    const ligadoDepois = i => Boolean(SCRIPTS[i] && config.scripts[i]);
+    const codigoMudou = Object.values(SCRIPTS).some(s =>
+        fonteAntes[s.id] !== undefined && fonteAntes[s.id] !== s.fonte && (antes[s.id] || config.scripts[s.id]));
+    if (codigoMudou) {
+        await recarregarScripts({ recarregarAbas: true });
+        return { aoVivo: true, recarregou: true };
+    }
+    const desligar = Object.keys(fonteAntes).filter(i => antes[i] && !ligadoDepois(i));
+    const ligar = Object.keys(SCRIPTS).filter(i => ligadoDepois(i) && !antes[i]);
+    if (desligar.length) aoVivo = await alternarAoVivo(desligar, false);
+    // Monta o código do perfil novo; scripts que a aba ainda não tem entram pelo injetarSeFaltar.
+    await recarregarScripts({ recarregarAbas: false });
+    if (ligar.length) aoVivo = await alternarAoVivo(ligar, true) && aoVivo;
+    for (const p of paginas) injetarSeFaltar(p).catch(() => {});
     return { aoVivo };
 }
 
@@ -1108,8 +1155,10 @@ const TIPO_EXPORTACAO = 'painel-de-scripts/perfil';
 
 function exportarPerfilApp(id) {
     const perfil = perfisApp.perfis.find(p => p.id === id);
-    const escolha = id === perfisApp.ativo ? config.scripts : (perfil.scripts || {});
-    const scripts = Object.values(SCRIPTS)
+    const estado = estadoDoPerfil(perfil);
+    const escolha = estado.scripts;
+    const lista = id === perfisApp.ativo ? SCRIPTS : listarScripts(estado, pastaScripts(id));
+    const scripts = Object.values(lista)
         .filter(s => !s.embutido || s.editado)
         .map(s => ({ id: s.id, nome: s.nome, embutido: s.embutido, codigo: s.fonte }));
     return {
@@ -1127,6 +1176,23 @@ async function importarPerfilApp(dados) {
     const res = { nome, novos: 0, atualizados: 0, iguais: 0, invalidos: [], falhasRequire: [] };
     const idNovo = {};
 
+    // Os scripts vão para o perfil de mesmo nome (ou um perfil novo), só na pasta dele.
+    let perfil = perfisApp.perfis.find(p => p.nome.toLowerCase() === nome.toLowerCase());
+    res.perfilExistia = Boolean(perfil);
+    if (!perfil) {
+        const cor = CORES_PERFIL.includes(dados.perfil.cor) ? dados.perfil.cor : CORES_PERFIL[0];
+        perfil = montarPerfilApp(nome, cor, config);
+        Object.assign(perfil, scriptsPerfil.estadoVazio(), { scripts: {} });
+        perfisApp.perfis.push(perfil);
+        prepararModulosDoPerfil(perfil);
+    }
+    const ativo = perfil.id === perfisApp.ativo;
+    const estado = estadoDoPerfil(perfil);
+    const pasta = pastaScripts(perfil.id);
+    fs.mkdirSync(pasta, { recursive: true });
+    const listaDoPerfil = () => (ativo ? (carregarListaScripts(), SCRIPTS) : listarScripts(estado, pasta));
+    let lista = listaDoPerfil();
+
     for (const sc of dados.scripts) {
         const codigo = String(sc.codigo || '');
         const v = validarScript(codigo);
@@ -1134,57 +1200,47 @@ async function importarPerfilApp(dados) {
         if (sc.embutido) {
             const e = embutidoPorId(sc.id);
             if (!e || MODULOS_RETIRADOS.includes(sc.id)) { res.invalidos.push(`${sc.nome}: o módulo não existe nesta versão do app.`); continue; }
-            const arq = path.join(PASTA_MODULOS, e.arquivo);
+            const arq = path.join(pastaModulos(perfil.id), e.arquivo);
             if (fs.existsSync(arq) && sha(fs.readFileSync(arq, 'utf8')) === sha(codigo)) res.iguais++;
             else { fs.writeFileSync(arq, codigo); res.atualizados++; }
             idNovo[sc.id] = sc.id;
             continue;
         }
         // Mesmo código já instalado: reaproveita. Mesmo id: é o mesmo script, atualiza o código.
-        const mesmoCodigo = config.scriptsExtras.find(x => SCRIPTS[x.id] && sha(SCRIPTS[x.id].fonte) === sha(codigo));
-        const mesmoId = config.scriptsExtras.find(x => x.id === sc.id);
+        const mesmoCodigo = estado.scriptsExtras.find(x => lista[x.id] && sha(lista[x.id].fonte) === sha(codigo));
+        const mesmoId = estado.scriptsExtras.find(x => x.id === sc.id);
         let id;
         if (mesmoCodigo) { id = mesmoCodigo.id; res.iguais++; }
         else if (mesmoId) {
             id = mesmoId.id;
-            fs.writeFileSync(path.join(PASTA_SCRIPTS, mesmoId.arquivo), codigo);
+            fs.writeFileSync(path.join(pasta, mesmoId.arquivo), codigo);
             res.atualizados++;
         } else {
             const base = (String(sc.id || '').replace(/[^a-zA-Z0-9_-]/g, '') || 'script').slice(0, 40);
             id = base;
-            for (let i = 2; SCRIPTS[id] || config.scriptsExtras.some(x => x.id === id) || id === 'painel' || id.startsWith('mod-'); i++) id = `${base}-${i}`;
-            config.scriptsExtras.push({ id, arquivo: `${id}.user.js` });
-            fs.writeFileSync(path.join(PASTA_SCRIPTS, `${id}.user.js`), codigo);
-            for (const p of perfisApp.perfis) (p.scripts = p.scripts || {})[id] = false;
-            config.scripts[id] = false;
+            for (let i = 2; lista[id] || estado.scriptsExtras.some(x => x.id === id) || id === 'painel' || id.startsWith('mod-'); i++) id = `${base}-${i}`;
+            estado.scriptsExtras.push({ id, arquivo: `${id}.user.js` });
+            fs.writeFileSync(path.join(pasta, `${id}.user.js`), codigo);
+            estado.scripts[id] = false;
             res.novos++;
         }
         idNovo[sc.id] = id;
         res.falhasRequire.push(...await baixarRequires(v.meta));
     }
 
-    carregarListaScripts();
+    lista = listaDoPerfil();
     const escolha = {};
     for (const [id, ligado] of Object.entries(dados.perfil.scripts || {})) {
         const alvo = idNovo[id] || id;
-        if (SCRIPTS[alvo]) escolha[alvo] = Boolean(ligado);
+        if (lista[alvo]) escolha[alvo] = Boolean(ligado);
     }
-
-    let perfil = perfisApp.perfis.find(p => p.nome.toLowerCase() === nome.toLowerCase());
-    res.perfilExistia = Boolean(perfil);
-    if (!perfil) {
-        const cor = CORES_PERFIL.includes(dados.perfil.cor) ? dados.perfil.cor : CORES_PERFIL[0];
-        perfil = montarPerfilApp(nome, cor, config);
-        // Perfil novo: só fica ligado o que estava ligado no arquivo.
-        perfil.scripts = Object.fromEntries(Object.keys(SCRIPTS).map(id => [id, false]));
-        perfisApp.perfis.push(perfil);
-    }
-    if (perfil.id === perfisApp.ativo) Object.assign(config.scripts, escolha);
-    else perfil.scripts = { ...(perfil.scripts || {}), ...escolha };
+    // Perfil novo: só fica ligado o que estava ligado no arquivo.
+    if (!res.perfilExistia) estado.scripts = Object.fromEntries(Object.keys(lista).map(id => [id, false]));
+    Object.assign(estado.scripts, escolha);
     res.ligados = Object.values(escolha).filter(Boolean).length;
-    res.ativo = perfil.id === perfisApp.ativo;
+    res.ativo = ativo;
     salvarConfig();
-    await recarregarScripts({ recarregarAbas: false });
+    if (ativo) await recarregarScripts({ recarregarAbas: false });
     log(`Perfil importado: ${nome} (${res.novos} scripts novos, ${res.atualizados} atualizados, ${res.iguais} já existiam).`);
     for (const x of res.invalidos) log('Não importado:', x);
     return res;
@@ -1195,7 +1251,10 @@ async function excluirPerfilApp(id) {
     const nome = perfisApp.perfis.find(p => p.id === id).nome;
     perfisApp.perfis = perfisApp.perfis.filter(p => p.id !== id);
     salvarConfig();
-    log(`Perfil excluído: ${nome}.`);
+    let guardado = null;
+    try { guardado = scriptsPerfil.moverParaExcluidos(PASTA_SCRIPTS, id, nome); }
+    catch (e) { log(`Não consegui guardar a pasta de scripts do perfil ${nome}:`, e.message); }
+    log(`Perfil excluído: ${nome}.${guardado ? ` Os scripts dele ficaram em ${guardado}.` : ''}`);
 }
 
 // ---------- Estado para o hub ----------
@@ -1226,7 +1285,8 @@ async function estadoAtual() {
     const conectado = Boolean(browser?.connected);
     return {
         versao: VERSAO,
-        pasta: PASTA_SCRIPTS,
+        pasta: pastaScripts(),
+        avisoMigracao,
         edge: {
             instalado: Boolean(acharNavegador()),
             navegador: nav().id,
@@ -1250,7 +1310,7 @@ async function estadoAtual() {
             cores: CORES_PERFIL,
             lista: perfisApp.perfis.map(p => ({
                 id: p.id, nome: p.nome, cor: p.cor,
-                ligados: scriptsLigados(p.id === perfisApp.ativo ? config.scripts : p.scripts)
+                ligados: scriptsLigados(estadoDoPerfil(p))
             }))
         },
         modulosRemovidos: config.modulosRemovidos.length,
@@ -1329,7 +1389,7 @@ async function tratarApi(caminho, corpoRecebido) {
             codigo = alterarCabecalho(codigo, 'description', descricao);
             const v = validarScript(codigo);
             if (v.erro) return resp(400, { erro: v.erro });
-            fs.writeFileSync(path.join(PASTA_SCRIPTS, sc.arquivo), codigo);
+            fs.writeFileSync(path.join(pastaScripts(), sc.arquivo), codigo);
             await recarregarScripts({ recarregarAbas: false });
             notificarHub();
             return resp(200, { ok: true });
@@ -1345,16 +1405,16 @@ async function tratarApi(caminho, corpoRecebido) {
                 const base = (v.meta.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'script').slice(0, 40);
                 id = base;
                 for (let i = 2; SCRIPTS[id] || config.scriptsExtras.some(x => x.id === id) || id === 'painel' || id.startsWith('mod-'); i++) id = `${base}-${i}`;
+                // O script novo é só do perfil em uso.
                 config.scriptsExtras.push({ id, arquivo: `${id}.user.js` });
-                // O script novo fica ligado só no perfil em uso: cada perfil escolhe os seus.
-                for (const p of perfisApp.perfis) (p.scripts = p.scripts || {})[id] = false;
                 config.scripts[id] = true;
                 salvarConfig();
             } else if (!SCRIPTS[id]) {
                 return resp(404, { erro: 'Script não encontrado.' });
             }
             const arquivo = SCRIPTS[id]?.arquivo || config.scriptsExtras.find(x => x.id === id).arquivo;
-            fs.writeFileSync(path.join(PASTA_SCRIPTS, arquivo), codigo);
+            fs.mkdirSync(pastaScripts(), { recursive: true });
+            fs.writeFileSync(path.join(pastaScripts(), arquivo), codigo);
             const falhas = await baixarRequires(v.meta);
             await recarregarScripts({ recarregarAbas: false });
             log(`Script ${caminho.endsWith('novo') ? 'adicionado' : 'salvo'}: ${v.meta.name}`);
@@ -1375,8 +1435,7 @@ async function tratarApi(caminho, corpoRecebido) {
                 const extra = config.scriptsExtras.find(x => x.id === id);
                 config.scriptsExtras = config.scriptsExtras.filter(x => x.id !== id);
                 delete config.scripts[id];
-                for (const p of perfisApp.perfis) delete p.scripts?.[id];
-                try { fs.renameSync(path.join(PASTA_SCRIPTS, extra.arquivo), path.join(PASTA_SCRIPTS, extra.arquivo + '.removido')); } catch {}
+                try { fs.renameSync(path.join(pastaScripts(), extra.arquivo), path.join(pastaScripts(), extra.arquivo + '.removido')); } catch {}
             }
             salvarConfig();
             await recarregarScripts({ recarregarAbas: false });
@@ -1419,7 +1478,7 @@ async function tratarApi(caminho, corpoRecebido) {
             if (!perfisApp.perfis.some(p => p.id === corpo.id)) return resp(404, { erro: 'Perfil não encontrado.' });
             const r = await trocarPerfilApp(corpo.id);
             notificarHub();
-            return resp(200, { ok: true, aoVivo: r.aoVivo, nome: perfilAtivo().nome, ligados: scriptsLigados(config.scripts) });
+            return resp(200, { ok: true, aoVivo: r.aoVivo, recarregou: Boolean(r.recarregou), nome: perfilAtivo().nome, ligados: scriptsLigados(config) });
         }
 
         case '/api/perfis-app/editar': {
@@ -1531,7 +1590,8 @@ async function tratarApi(caminho, corpoRecebido) {
             return resp(200, { ok: true });
 
         case '/api/pasta':
-            abrirPasta(PASTA_SCRIPTS);
+            fs.mkdirSync(pastaScripts(), { recursive: true });
+            abrirPasta(pastaScripts());
             return resp(200, { ok: true });
 
         default:
@@ -1584,7 +1644,7 @@ async function iniciar(novosGanchos) {
 
     prepararArquivosScripts();
     montarCodigo();
-    log(`Script em ${PASTA_SCRIPTS}`);
+    log(`Scripts do perfil ${perfilAtivo().nome} em ${pastaScripts()}`);
 
     await conectarEdge().catch(() => {});
 

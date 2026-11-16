@@ -20,7 +20,8 @@ tela de controle, é a janela do app. A versão fica em `version` no `package.js
 | `gerar-modulos.js` | Monta `src/embutidos/modulos/index.js` a partir dos arquivos da pasta. |
 | `src/principal/atualizador.js` | Atualização automática (electron-updater). O botão "Reiniciar e instalar" mostra a tela "Atualizando" e roda o instalador visível: só a barra de progresso, que fecha sozinha e reabre o Painel. |
 | `build/instalador.nsh` | Ajustes no instalador NSIS para a atualização: pula as telas "para quem" e final, fecha sozinho e reabre o app. A instalação normal continua igual. |
-| `publicar.js` | `npm run publicar`: gera o instalador e publica a release no GitHub (atualização automática). |
+| `src/scriptsPerfil.js` | Pasta e listas de scripts de cada perfil do app: módulos por perfil, migração da pasta única, cópia e exclusão. Testado em `tests/`. |
+| `.github/workflows/publicar.yml` | Publicação: a tag `v<versão>` gera o instalador e cria a Release com o `latest.yml` (atualização automática). |
 
 ## Módulos (userscripts)
 
@@ -32,13 +33,19 @@ tela de controle, é a janela do app. A versão fica em `version` no `package.js
 
 ```bash
 npm install
+npm test               # testes dos scripts por perfil
 npm run gerar          # só se adicionou ou tirou script em src/embutidos/modulos
 npm start              # abre o app sem instalar
 npm run dist           # gera out/PainelDeScripts-Setup-<versão>.exe (sem publicar)
-npm run publicar       # gera e publica no GitHub; precisa de GH_TOKEN definido
 ```
 
-Antes de publicar, suba `version` no `package.json`: as máquinas só atualizam para uma versão maior que a instalada.
+## Publicar uma versão
+
+1. Suba `version` no `package.json` e no `package-lock.json`: as máquinas só atualizam para uma versão maior que a instalada.
+2. Commit e push no `main`.
+3. `git tag v<versão>` e `git push origin v<versão>`.
+
+O workflow confere a versão, roda os testes, gera o instalador e cria a Release. O app instalado encontra a versão nova sozinho.
 
 Se o Electron abrir como Node puro (erro ao carregar `electron`), a variável
 `ELECTRON_RUN_AS_NODE` está definida no terminal: rode `unset ELECTRON_RUN_AS_NODE` antes.
@@ -48,8 +55,10 @@ Se o Electron abrir como Node puro (erro ao carregar `electron`), a variável
 Ficam em `%LOCALAPPDATA%\PainelDeScripts`:
 
 - `config.json` e `dados.json`
-- `perfis.json`: os perfis do app (cada um com seus scripts ligados, listas de perfis do navegador e navegador)
-- a pasta `scripts/`
+- `perfis.json`: os perfis do app, cada um com os seus scripts (ligados, adicionados, módulos removidos), listas de perfis do navegador e navegador
+- `scripts\perfis\<id do perfil>\`: os scripts de cada perfil (módulos do app em `modulos\` e os adicionados). Perfil excluído vai para `scripts\perfis\_excluidos\`
+- `scripts\requires\`: bibliotecas dos `@require`, para todos os perfis
+- `scripts-antes-1.1.0\`: a pasta única de scripts de antes da 1.1.0, guardada na primeira abertura
 - `painel.log`
 - as cópias de perfil: `edge-perfis`, `chrome-perfis`
 
