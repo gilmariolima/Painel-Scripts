@@ -1,0 +1,135 @@
+// ==UserScript==
+// @name         Area de clique e copia
+// @version      1.5.0
+// @description  Copiar com um Clique (SmartBus/Guanabara)
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 9 — Copiar com um Clique (SmartBus/Guanabara)
+// =========================================================================
+function criarModuloSmartbusCopiarClique() {
+    // Adicionado: guarda cada elemento + handler para o destroy() conseguir
+    // remover o listener e reverter o estilo (o script original nunca desligava)
+    const elementosAtivos = [];
+
+    function isReserva() {
+        return document.querySelector('.page-title')?.textContent?.trim() === 'Reserva';
+    }
+
+    function normalizarDocumento(texto) {
+        if (texto.includes('-')) {
+            return texto.split('-').slice(1).join('-').trim();
+        }
+        return texto.trim();
+    }
+
+    function aplicarCliqueCopiar(el, tipo = 'normal') {
+        if (!el || el.dataset.copiarAtivo) return;
+        let texto = el.textContent?.trim();
+        if (!texto) return;
+        if (tipo === 'documento') {
+            texto = normalizarDocumento(texto);
+        }
+
+        el.dataset.copiarAtivo = 'true';
+        el.style.border = '1px dashed #3b82f6';
+        el.style.padding = '4px 10px';
+        el.style.borderRadius = '6px';
+        el.style.cursor = 'pointer';
+        el.style.transition = 'border-color .2s ease, background-color .2s ease';
+        el.title = 'Clique para copiar';
+
+        const handler = (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(texto);
+            el.style.borderColor = 'green';
+            el.style.backgroundColor = '#e6f4ea';
+            setTimeout(() => {
+                el.style.borderColor = '#3b82f6';
+                el.style.backgroundColor = 'transparent';
+            }, 1200);
+        };
+
+        el.addEventListener('click', handler);
+        elementosAtivos.push({ el, handler });
+    }
+
+    function aplicar() {
+        if (!isReserva()) return;
+
+        document.querySelectorAll('.col-coupon-service-title b').forEach(el => aplicarCliqueCopiar(el));
+
+        document.querySelectorAll('.col-coupon-service b').forEach(b => {
+            if (/\d{2}\/\d{2}\/\d{4}/.test(b.textContent)) {
+                aplicarCliqueCopiar(b);
+            }
+        });
+
+        const tituloPassageiros = [...document.querySelectorAll('h3,h4')]
+            .find(h => h.textContent.trim() === 'Passageiros');
+
+        if (tituloPassageiros) {
+            const bloco = tituloPassageiros.closest('.card, .card-body, .card-coupon-area');
+            bloco?.querySelectorAll('tbody tr').forEach(tr => {
+                const tds = tr.querySelectorAll('td');
+                aplicarCliqueCopiar(tds[1]);
+                aplicarCliqueCopiar(tds[2], 'documento');
+                aplicarCliqueCopiar(tds[4]);
+            });
+        }
+
+        document.querySelectorAll('.card-coupon-actions').forEach(card => {
+            [...card.querySelectorAll('*')].forEach(el => {
+                if (el.textContent?.trim() === 'E-mail') {
+                    const email = el.nextElementSibling;
+                    if (email) aplicarCliqueCopiar(email);
+                }
+            });
+        });
+    }
+
+    let observer = null;
+
+    return {
+        id: 'smartbus_copiar_clique',
+        name: 'SMART BUS - Area de clique e copia',
+        defaultOn: true,
+        fixo: true, // módulo embutido no código-fonte, não pode ser excluído pelo painel
+
+        init() {
+            // este widget só faz sentido no sistema de reservas da Guanabara/SmartBus
+            if (!location.hostname.includes('smarttravelit.com')) return;
+
+            observer = new MutationObserver(aplicar);
+            observer.observe(document.body, { childList: true, subtree: true });
+            aplicar();
+        },
+
+        destroy() {
+            if (observer) {
+                observer.disconnect();
+                observer = null;
+            }
+
+            elementosAtivos.forEach(({ el, handler }) => {
+                el.removeEventListener('click', handler);
+                el.style.border = '';
+                el.style.padding = '';
+                el.style.borderRadius = '';
+                el.style.cursor = '';
+                el.style.transition = '';
+                el.style.borderColor = '';
+                el.style.backgroundColor = '';
+                el.title = '';
+                delete el.dataset.copiarAtivo;
+            });
+            elementosAtivos.length = 0;
+        }
+    };
+}
+
+registrarModulo(criarModuloSmartbusCopiarClique());

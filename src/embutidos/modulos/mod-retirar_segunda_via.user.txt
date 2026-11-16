@@ -1,0 +1,58 @@
+// ==UserScript==
+// @name         Retirar segunda via
+// @version      1.0.0
+// @description  Esconde o botão "IMPRIMIR 2 VIA" do cartão do cupom (.card-coupon-actions)
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+function criarModuloRetirarSegundaVia() {
+    const MARCA = 'data-painel-segunda-via';
+    let observer = null;
+
+    // "IMPRIMIR 2 VIA", "Imprimir 2ª via", "IMPRIMIR 2º VIA"...
+    const ehSegundaVia = el => {
+        const texto = (el.innerText || el.textContent || '')
+            .normalize('NFD').replace(/[̀-ͯ]/g, '')
+            .replace(/\s+/g, ' ').trim().toUpperCase();
+        return /IMPRIMIR\s*2\s*[ªº°A]?\s*VIA/.test(texto);
+    };
+
+    function esconder() {
+        document.querySelectorAll('.card-coupon-actions').forEach(caixa => {
+            caixa.querySelectorAll('button, a, [role="button"], .btn').forEach(botao => {
+                if (botao.hasAttribute(MARCA) || !ehSegundaVia(botao)) return;
+                // Se o texto está num botão dentro de outro, esconde o de fora.
+                const alvo = botao.parentElement?.closest('.card-coupon-actions button, .card-coupon-actions a, .card-coupon-actions [role="button"], .card-coupon-actions .btn') || botao;
+                if (alvo.hasAttribute(MARCA)) return;
+                alvo.setAttribute(MARCA, alvo.style.display);
+                alvo.style.setProperty('display', 'none', 'important');
+            });
+        });
+    }
+
+    return {
+        id: 'retirar_segunda_via',
+        name: 'SMART BUS - Retirar segunda via',
+        defaultOn: true,
+
+        init() {
+            esconder();
+            observer = new MutationObserver(esconder);
+            observer.observe(document.body, { childList: true, subtree: true });
+        },
+
+        destroy() {
+            observer?.disconnect();
+            observer = null;
+            document.querySelectorAll(`[${MARCA}]`).forEach(el => {
+                el.style.display = el.getAttribute(MARCA);
+                el.removeAttribute(MARCA);
+            });
+        }
+    };
+}
+
+registrarModulo(criarModuloRetirarSegundaVia());

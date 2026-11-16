@@ -1,0 +1,83 @@
+// ==UserScript==
+// @name         Remover Acentos ao Colar (Nomes)
+// @version      1.5.0
+// @description  Remover Acentos ao Colar (Nomes)
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+// MÓDULO 14 — Remover Acentos ao Colar (Nomes)
+// =========================================================================
+function criarModuloRemoverAcentos() {
+    let handlePaste = null;
+
+    function removerAcentos(texto) {
+        return texto
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    // Se o texto tiver "ç"/"Ç" em algum ponto, corta ali e descarta o resto inteiro
+    function cortarNoCedilha(texto) {
+        const idx = texto.search(/[çÇ]/);
+        if (idx === -1) return texto;
+        return texto.slice(0, idx);
+    }
+
+    function processarTexto(texto) {
+        const cortado = cortarNoCedilha(texto);
+        return removerAcentos(cortado);
+    }
+
+    function disparaEventosAngular(input) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function tratarPaste(event) {
+        const input = event.target;
+
+        if (!input.classList || !input.classList.contains('ng-valid')) return;
+        if (input.tagName !== 'INPUT') return;
+
+        event.preventDefault();
+
+        const textoColado = (event.clipboardData || window.clipboardData).getData('text');
+        const textoLimpo = processarTexto(textoColado);
+
+        const start = input.selectionStart;
+        const end = input.selectionEnd;
+        const valorAtual = input.value;
+
+        input.value = valorAtual.slice(0, start) + textoLimpo + valorAtual.slice(end);
+
+        const novaPosicao = start + textoLimpo.length;
+        input.setSelectionRange(novaPosicao, novaPosicao);
+
+        disparaEventosAngular(input);
+    }
+
+    return {
+        id: 'remover_acentos_nomes',
+        name: 'SMART BUS - Remover Acentos ao Colar (Nomes)',
+        defaultOn: true,
+        fixo: false,
+
+        init() {
+            handlePaste = tratarPaste;
+            document.addEventListener('paste', handlePaste, true);
+        },
+
+        destroy() {
+            if (handlePaste) {
+                document.removeEventListener('paste', handlePaste, true);
+                handlePaste = null;
+            }
+        }
+    };
+}
+
+registrarModulo(criarModuloRemoverAcentos());

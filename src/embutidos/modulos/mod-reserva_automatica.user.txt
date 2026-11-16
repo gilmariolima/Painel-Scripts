@@ -1,0 +1,1303 @@
+// ==UserScript==
+// @name         Copiar e Refazer Reserva
+// @version      1.8.0
+// @description  SMART BUS: Copiar e Refazer Reserva
+// @match        *://*.smarttravelit.com/*
+// @grupo        SmartBus
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+// =========================================================================
+    // MÓDULO — SMART BUS: Copiar e Refazer Reserva
+    // =========================================================================
+    // Tela da reserva: botão "Copiar reserva" (dentro do .card-coupon-area) lê trechos,
+    // poltronas e passageiros e copia um JSON. Telas "Nova pesquisa para reserva/venda"
+    // (normal ou fiscal): colar esse JSON na caixa ao lado de PESQUISAR refaz a reserva
+    // sozinho (pesquisa, viagem, tarifa NORMAL mais barata, poltronas e dados dos
+    // passageiros) e para antes de finalizar, para conferência.
+    function criarModuloReservaAutomatica() {
+        const STORAGE_KEY = 'reserva_pendente';
+        const NASCIMENTO_PADRAO = '01/10/2026'; // usada para todos os passageiros
+        const norm = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+
+        // ───────────────────────── Leitura da tela ─────────────────────────
+
+        // Blocos ".col-md-12" cujo texto começa com "Trecho". Fica só com o mais interno,
+        // para um bloco pai não ser contado junto com o filho. 1º = ida, 2º = volta.
+        function blocosTrecho() {
+            const todos = Array.from(document.querySelectorAll('.col-md-12'))
+                .filter((el) => /^Trecho\b/i.test(norm(el.textContent)));
+            const internos = todos.filter((el) => !todos.some((o) => o !== el && el.contains(o)));
+            if (internos.length) return internos;
+            const fallback = document.querySelectorAll('.col-md-12')[8]; // posição informada
+            return fallback ? [fallback] : [];
+        }
+
+        // Texto do elemento com " → " no lugar de cada ícone (a seta do trecho é um ícone,
+        // então no textContent as duas cidades vêm coladas: "QUIXERAMOBIM - CEQUIXADA - CE").
+        function textoComSetas(el) {
+            let t = '';
+            const andar = (n) => {
+                if (n.nodeType === 3) { t += n.nodeValue; return; }
+                if (n.nodeType !== 1) return;
+                const cls = typeof n.className === 'string' ? n.className : '';
+                if (n.tagName === 'I' || n.tagName === 'svg' || /\bfa-|arrow|seta/i.test(cls)) { t += ' → '; return; }
+                n.childNodes.forEach(andar);
+            };
+            andar(el);
+            return norm(t);
+        }
+
+        const UFS = 'AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO';
+
+        // Tira as observações entre parênteses que vêm DEPOIS da sigla do estado, como em
+        // "JFA - SHOPPING INDEPENDENCIA - MG (term adicional de JUIZ DE FORA)". O que vem
+        // antes da sigla é parte do nome e fica: "FORTALEZA (TA MESSEJANA) - CE".
+        // Também tira um "(...)" solto no começo (sobra de quando a observação ficava depois da seta).
+        function limparNome(t) {
+            return norm(String(t || '')
+                .replace(/^\s*\([^)]*\)\s*/, '')
+                .replace(new RegExp(`(\\s-\\s(?:${UFS}))\\s*\\([^)]*\\)`, 'g'), '$1'));
+        }
+        const terminaEmUF = (t) => new RegExp(`\\s-\\s(?:${UFS})$`).test(t);
+
+        // Separa "ORIGEM - UF" e "DESTINO - UF". O nome pode ter " - " no meio
+        // (ex.: "JFA - SHOPPING INDEPENDENCIA - MG"), então só conta como fim de cidade
+        // um " - UF" com UF de verdade.
+        function separarCidades(meio) {
+            // 1) Pela seta
+            const partes = meio.split(/\s*(?:→|->|>)\s*/).map(limparNome).filter(Boolean);
+            const comUF = partes.filter(terminaEmUF);
+            if (comUF.length >= 2) return [comUF[0], comUF[comUF.length - 1]];
+            // 2) Texto colado: corta logo depois de um " - UF" que vem grudado na próxima cidade
+            const s = limparNome(meio);
+            const re = new RegExp(`\\s-\\s(?:${UFS})(?=[A-Z0-9])`, 'g');
+            let corte = -1, m;
+            while ((m = re.exec(s))) corte = m.index + m[0].length;
+            if (corte > 0) {
+                const a = norm(s.slice(0, corte)), b = norm(s.slice(corte));
+                if (terminaEmUF(a) && terminaEmUF(b)) return [a, b];
+            }
+            return partes;
+        }
+
+        // "Trecho QUIXERAMOBIM - CE → QUIXADA - CE Serviço 10101750"
+        function parseTrecho(el) {
+            const txt = textoComSetas(el).replace(/^(?:→\s*)+/, '');
+            const m = txt.match(/^Trecho\s*(?:→\s*)?(.+?)\s*(?:→\s*)?Servi[çc]o\s*:?\s*(?:→\s*)?(\d+)/i);
+            if (!m) return null;
+            const cidades = separarCidades(m[1].replace(/^→\s*|\s*→$/g, ''));
+            return { origem: limparNome(cidades[0]), destino: limparNome(cidades[1]), servico: m[2] };
+        }
+
+        // Texto que vem logo depois de um ícone (até o próximo ícone). Se vier vazio,
+        // usa o texto do elemento pai.
+        function textoApos(icone) {
+            let t = '';
+            for (let n = icone.nextSibling; n; n = n.nextSibling) {
+                if (n.nodeType === 1 && n.matches('i, .fa')) break;
+                t += n.textContent;
+            }
+            t = norm(t);
+            return t || norm(icone.parentElement?.textContent);
+        }
+
+        // Elementos que aparecem depois do bloco "Trecho" i e antes do próximo
+        // (assim os dados da ida não se misturam com os da volta)
+        function doTrecho(seletor, blocos, i) {
+            const ini = blocos[i], fim = blocos[i + 1];
+            return Array.from(document.querySelectorAll(seletor)).filter((el) =>
+                (ini.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+                (!fim || (el.compareDocumentPosition(fim) & Node.DOCUMENT_POSITION_FOLLOWING))
+            );
+        }
+        const iconeDoTrecho = (seletor, blocos, i) => doTrecho(seletor, blocos, i)[0];
+
+        // Linhas da tabela: <td class="td-passenger-name"><span class="badge seat">7</span> nome</td>
+        function lerPassageiros(blocos, i) {
+            return doTrecho('td.td-passenger-name', blocos, i).map((td) => {
+                const poltrona = norm(td.querySelector('.badge.seat')?.textContent);
+                const copia = td.cloneNode(true);
+                copia.querySelectorAll('.badge.seat').forEach((b) => b.remove());
+                return { poltrona, nome: norm(copia.textContent) };
+            }).filter((p) => p.nome);
+        }
+
+        // Data: "17/10/2026" | Horário: "17:51 - 19:11" (saída - chegada)
+        function lerDataHora(blocos, i) {
+            const out = { data: '', horario: '', chegada: '' };
+            const cal = iconeDoTrecho('i.fa-calendar', blocos, i);
+            if (cal) out.data = (textoApos(cal).match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0];
+            const rel = iconeDoTrecho('i.fa-clock, i.fa-clock-o', blocos, i);
+            if (rel) {
+                const m = textoApos(rel).match(/(\d{1,2}:\d{2})(?:\s*-\s*(\d{1,2}:\d{2}))?/);
+                if (m) { out.horario = m[1]; out.chegada = m[2] || ''; }
+            }
+            return out;
+        }
+
+        // Card "Passageiros" (div.card-coupon-area): nome, documento e telefone.
+        // A tabela repete a pessoa uma vez por trecho; o resultado sai por nome.
+        function lerCardPassageiros() {
+            const dados = new Map();
+            document.querySelectorAll('.card-coupon-area').forEach((card) => {
+                const cab = Array.from(card.querySelectorAll('thead th, tr:first-child th')).map((th) => norm(th.textContent).toLowerCase());
+                const col = (nome) => cab.findIndex((t) => t.startsWith(nome));
+                card.querySelectorAll('tr').forEach((tr) => {
+                    const tds = Array.from(tr.querySelectorAll('td'));
+                    if (!tds.length) return;
+                    const alinhado = cab.length === tds.length;
+
+                    const docTd = tr.querySelector('td.td-with-paragraph') || (alinhado && tds[col('documento')]);
+                    const docTxt = norm(docTd?.textContent);
+                    const dm = docTxt.match(/^([A-Za-z]+)\s*-\s*(.+)$/);
+
+                    let nomeTd = alinhado && col('passageiro') >= 0 ? tds[col('passageiro')] : null;
+                    if (!nomeTd && docTd) nomeTd = docTd.previousElementSibling;
+                    const nome = norm(nomeTd?.textContent).replace(/^#\d+\s*/, '');
+
+                    let telTd = alinhado && col('telefone') >= 0 ? tds[col('telefone')] : null;
+                    if (!telTd) telTd = tds.find((td) => /\(?\d{2}\)?\s*\d{4,5}-?\d{4}/.test(td.textContent) && td !== docTd);
+                    const telefone = (norm(telTd?.textContent).match(/[\d()\s-]{10,}/) || [''])[0].replace(/\D/g, '');
+
+                    if (!nome || !/[a-zà-ú]/i.test(nome)) return;
+                    dados.set(nome.toLowerCase(), {
+                        nome,
+                        tipoDocumento: dm ? dm[1].toUpperCase() : '',
+                        documento: dm ? dm[2].replace(/\s/g, '') : docTxt,
+                        telefone,
+                    });
+                });
+            });
+            return dados;
+        }
+
+        // Os próximos blocos (datas, horário, poltronas, passageiros) entram aqui conforme forem mapeados.
+        function capturarTela() {
+            const r = {
+                capturadoEm: new Date().toISOString(),
+                ida: { origem: '', destino: '', data: '', horario: '', chegada: '', servico: '', poltronas: [] },
+                volta: null,
+                passageiros: [],
+            };
+
+            // Cada trecho leva a própria origem/destino, lidos do seu bloco "Trecho"
+            const blocos = blocosTrecho().filter(parseTrecho);
+            const paxPorTrecho = [];
+            const trecho = (i) => {
+                const t = parseTrecho(blocos[i]);
+                const pax = lerPassageiros(blocos, i);
+                paxPorTrecho[i] = pax;
+                return {
+                    origem: t.origem, destino: t.destino, ...lerDataHora(blocos, i), servico: t.servico,
+                    poltronas: pax.map((p) => p.poltrona).filter(Boolean),
+                };
+            };
+            if (blocos[0]) r.ida = trecho(0);
+            if (blocos[1]) r.volta = trecho(1);
+
+            // Junta os passageiros da ida e da volta pelo nome, guardando a poltrona de cada trecho
+            const novoPax = (nome) => ({
+                nome, poltronaIda: '', poltronaVolta: '',
+                tipoDocumento: '', documento: '', nascimento: NASCIMENTO_PADRAO, telefone: '',
+            });
+            const porNome = new Map();
+            paxPorTrecho.forEach((lista, i) => (lista || []).forEach((p) => {
+                const chave = p.nome.toLowerCase();
+                if (!porNome.has(chave)) {
+                    porNome.set(chave, novoPax(p.nome));
+                }
+                porNome.get(chave)[i === 0 ? 'poltronaIda' : 'poltronaVolta'] = p.poltrona;
+            }));
+
+            // Completa com documento e telefone do card "Passageiros"
+            lerCardPassageiros().forEach((d, chave) => {
+                if (!porNome.has(chave)) porNome.set(chave, novoPax(d.nome));
+                Object.assign(porNome.get(chave), { tipoDocumento: d.tipoDocumento, documento: d.documento, telefone: d.telefone });
+            });
+            r.passageiros = Array.from(porNome.values());
+            return r;
+        }
+
+        // Lista o que ainda veio vazio, para o aviso
+        function faltando(r) {
+            const f = [];
+            if (!r.ida.origem || !r.ida.destino) f.push('trecho');
+            if (!r.ida.servico) f.push('serviço');
+            if (!r.ida.data) f.push('data');
+            if (!r.ida.horario) f.push('horário');
+            if (!r.ida.poltronas.length) f.push('poltronas');
+            if (!r.passageiros.length) f.push('passageiros');
+            if (r.passageiros.some((p) => !p.documento)) f.push('documento');
+            if (r.passageiros.some((p) => !p.telefone)) f.push('telefone');
+            return f;
+        }
+
+        // ───────────────────────── Preenchimento: Nova pesquisa para reserva ─────────────────────────
+        const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+        const semAcento = (t) => norm(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+        // Visível na tela (funciona também dentro de modal com position: fixed)
+        const visivel = (el) => !!(el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+        const log = (...a) => console.log('[Reserva automática]', ...a);
+
+        async function esperar(fn, ms = 8000, passo = 150) {
+            const fim = Date.now() + ms;
+            while (Date.now() < fim) {
+                const v = fn();
+                if (v) return v;
+                await sleep(passo);
+            }
+            return null;
+        }
+
+        function mouse(el, tipo) {
+            el.dispatchEvent(new MouseEvent(tipo, { bubbles: true, cancelable: true, view: pageWin, button: 0, buttons: 1 }));
+        }
+
+        // Campo (dentro do mesmo grupo) cujo rótulo é exatamente o texto informado
+        function campoPorRotulo(rotulo, seletor) {
+            const alvo = semAcento(rotulo);
+            const rotulos = Array.from(document.querySelectorAll('label, span, div, p'))
+                .filter((el) => el.children.length <= 1 && semAcento(el.textContent).replace(/^\*\s*/, '') === alvo);
+            for (const r of rotulos) {
+                for (let box = r.parentElement, n = 0; box && n < 4; box = box.parentElement, n++) {
+                    const c = Array.from(box.querySelectorAll(seletor)).find(visivel);
+                    if (c) return c;
+                }
+            }
+            return null;
+        }
+
+        // "FORTALEZA - CE" -> { cidade: "FORTALEZA", uf: "CE" }
+        // "JFA - SHOPPING INDEPENDENCIA - MG" -> { cidade: "JFA - SHOPPING INDEPENDENCIA", uf: "MG" }
+        function partesCidade(txt) {
+            txt = limparNome(txt);
+            const m = semAcento(txt).match(/^(.*)\s+-\s+([A-Z]{2})$/) || semAcento(txt).match(/^(.*?)\s*-\s*([A-Z]{2})$/);
+            return m ? { cidade: norm(m[1]), uf: m[2] } : { cidade: semAcento(txt), uf: '' };
+        }
+
+        // Tira o código do começo ("RUS - ", "JFA - ") e espaços extras em volta dos hífens
+        const semCodigo = (t) => semAcento(limparNome(t)).replace(/\s*-\s*/g, ' - ').replace(/^[A-Z0-9]{2,5} - (?=.+ - )/, '');
+        const comHifen = (t) => semAcento(limparNome(t)).replace(/\s*-\s*/g, ' - ');
+
+        // Escolhe a opção certa entre as da lista. Um ponto de embarque (ex.: "JFA - SHOPPING
+        // INDEPENDENCIA - MG") aparece junto com a cidade dele ("JUIZ DE FORA - MG"), então
+        // a comparação é pelo nome inteiro, com e sem o código do começo.
+        function melhorOpcao(opcoes, alvo) {
+            const { cidade, uf } = partesCidade(alvo);
+            const alvos = new Set([comHifen(alvo), semCodigo(alvo)]);
+            const formas = (o) => [comHifen(o.textContent), semCodigo(o.textContent)];
+
+            const exatas = opcoes.filter((o) => formas(o).some((f) => alvos.has(f)));
+            if (exatas.length) return exatas[0];
+
+            const nomeSemCod = partesCidade(semCodigo(alvo)).cidade;
+            const parecidas = opcoes.filter((o) => {
+                const t = comHifen(o.textContent);
+                return (t.includes(cidade) || t.includes(nomeSemCod)) && (!uf || t.endsWith(`- ${uf}`));
+            });
+            if (parecidas.length <= 1) return parecidas[0] || null;
+            // Várias parecidas: serve se só uma começar com o nome procurado
+            const comecam = parecidas.filter((o) => semCodigo(o.textContent).startsWith(nomeSemCod));
+            return comecam.length === 1 ? comecam[0] : null;
+        }
+
+        // O que digitar na busca da lista, do mais completo ao mais curto
+        function termosBusca(alvo) {
+            const { cidade } = partesCidade(alvo);
+            const semCod = partesCidade(semCodigo(alvo)).cidade;
+            const termos = [cidade, semCod];
+            const partes = cidade.split(' - ').map(norm).filter(Boolean);
+            if (partes.length > 1) termos.push(partes.sort((a, b) => b.length - a.length)[0]);
+            return [...new Set(termos.filter(Boolean))];
+        }
+
+        async function escolherSelect2(selecao, alvo) {
+            const $ = pageWin.jQuery;
+            // O <select> original fica escondido logo antes do container do select2
+            const container = selecao.closest('.select2-container');
+            const select = container?.previousElementSibling?.tagName === 'SELECT'
+                ? container.previousElementSibling
+                : container?.parentElement?.querySelector('select');
+
+            // 1) Opções já carregadas no <select>: escolhe direto
+            if (select && $ && select.options.length > 1) {
+                const op = melhorOpcao(Array.from(select.options), alvo);
+                if (op) {
+                    $(select).val(op.value).trigger('change');
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    await sleep(300);
+                    return norm(op.textContent);
+                }
+            }
+
+            // 2) Lista carregada ao digitar: abre, digita a cidade e clica na opção
+            if (select && $) { try { $(select).select2('open'); } catch (e) { /* tenta pelo clique */ } }
+            let busca = Array.from(document.querySelectorAll('.select2-container--open .select2-search__field')).find(visivel);
+            if (!busca) {
+                mouse(selecao, 'mousedown');
+                mouse(selecao, 'mouseup');
+                busca = await esperar(() =>
+                    Array.from(document.querySelectorAll('.select2-container--open .select2-search__field')).find(visivel)
+                , 3000);
+            }
+            if (!busca) throw new Error(`Não abriu a lista para "${alvo}".`);
+
+            // Tenta do termo mais completo ao mais curto até achar a opção certa
+            let escolhida = null, vistas = [];
+            for (const termo of termosBusca(alvo)) {
+                busca.focus();
+                busca.value = termo;
+                ['input', 'keyup'].forEach((t) => busca.dispatchEvent(new Event(t, { bubbles: true })));
+                await sleep(250);
+                const opcoes = await esperar(() => {
+                    const ops = Array.from(document.querySelectorAll('.select2-container--open .select2-results__option'))
+                        .filter((o) => !o.classList.contains('loading-results') && !o.classList.contains('select2-results__message'));
+                    return ops.length ? ops : null;
+                }, 5000);
+                log(`busca "${termo}":`, (opcoes || []).map((o) => norm(o.textContent)));
+                if (!opcoes) continue;
+                vistas = opcoes.map((o) => norm(o.textContent));
+                escolhida = melhorOpcao(opcoes, alvo);
+                if (escolhida) break;
+            }
+            if (!escolhida) {
+                // Deixa a lista aberta para você escolher
+                if (!vistas.length) throw new Error(`Nenhuma opção encontrada para "${alvo}".`);
+                throw new Error(`Não achei "${alvo}" com certeza na lista (${vistas.slice(0, 4).join(' / ')}). Escolha na lista e continue manualmente.`);
+            }
+            const texto = norm(escolhida.textContent);
+            mouse(escolhida, 'mouseenter');
+            mouse(escolhida, 'mousedown');
+            mouse(escolhida, 'mouseup');
+            if (escolhida.isConnected) escolhida.click();
+            await sleep(300);
+            return texto;
+        }
+
+        // Data no campo com datepicker (dd/mm/aaaa)
+        function preencherData(input, data) {
+            const $ = pageWin.jQuery;
+            input.focus();
+            try { if ($ && $(input).datepicker) $(input).datepicker('setDate', data); } catch (e) { /* segue com o valor direto */ }
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            setter.call(input, data);
+            ['input', 'change', 'keyup'].forEach((t) => input.dispatchEvent(new Event(t, { bubbles: true })));
+            try { if ($ && $(input).datepicker) $(input).datepicker('hide'); } catch (e) { /* ok */ }
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+
+        function lerReservaSalva() {
+            const r = GM_getValue(STORAGE_KEY, null);
+            if (r && r.ida) return r;
+            const colado = prompt('Nenhuma reserva copiada. Cole aqui o JSON da reserva:');
+            if (!colado) return null;
+            try { return JSON.parse(colado); } catch { toast('JSON inválido.', true); return null; }
+        }
+
+        // Usa o mesmo critério da caixa (aceita o selo "fiscal" num elemento separado)
+        function telaDePesquisa() {
+            return titulosPesquisa().length > 0;
+        }
+
+        // Clique como o de uma pessoa: no elemento que está de fato no ponto clicado
+        // (o card pode ter o clique preso num filho, e um .click() no card não chega lá)
+        function cliqueReal(el, fx = 0.5, fy = 0.5) {
+            // Rolagem instantânea: com rolagem suave o ponto do clique sai do lugar
+            el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+            const r = el.getBoundingClientRect();
+            const x = r.left + r.width * fx, y = r.top + r.height * fy;
+            let alvo = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+            if (!alvo || !el.contains(alvo)) alvo = el;
+            log('clicando em', alvo);
+            const base = { bubbles: true, cancelable: true, view: pageWin, clientX: x, clientY: y, button: 0 };
+            const Pointer = pageWin.PointerEvent || MouseEvent;
+            alvo.dispatchEvent(new Pointer('pointerdown', { ...base, buttons: 1 }));
+            alvo.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+            alvo.dispatchEvent(new Pointer('pointerup', base));
+            alvo.dispatchEvent(new MouseEvent('mouseup', base));
+            alvo.dispatchEvent(new MouseEvent('click', base));
+            return alvo;
+        }
+
+        // ───────────────────────── Etapa 2: viagem, tarifa e poltronas ─────────────────────────
+        const preco = (t) => parseFloat(String(t).replace(/[^\d,]/g, '').replace(',', '.')) || 0;
+        const cardsViagem = () => Array.from(document.querySelectorAll('.sales-service-card')).filter(visivel);
+        const listaTarifas = () => Array.from(document.querySelectorAll('.div-family-price-list')).find(visivel);
+        let trechoAtual = 'ida'; // muda para 'volta' depois que as poltronas da ida forem escolhidas
+
+        // Card da viagem: serviço em ".service-col-7 b" + horário de saída no texto do card
+        function codigoServico(card) {
+            return norm(card.querySelector('.service-col-7 b')?.textContent).replace(/\D/g, '') ||
+                (norm(card.textContent).match(/\b\d{8}\b/) || [''])[0];
+        }
+
+        function acharViagem(t, cards = cardsViagem()) {
+            log(`${cards.length} card(s) de viagem na tela:`, cards.map((c) => codigoServico(c) + ' ' + (norm(c.textContent).match(/\d{2}:\d{2}/) || [''])[0]));
+            if (!cards.length) throw new Error('Nenhuma viagem encontrada na tela (.sales-service-card).');
+
+            const doServico = cards.filter((c) => codigoServico(c) === String(t.servico));
+            const comHorario = doServico.filter((c) => norm(c.textContent).includes(t.horario));
+            const lista = comHorario.length ? comHorario : doServico;
+            if (!lista.length) {
+                const vistos = cards.map(codigoServico).slice(0, 6).join(', ');
+                throw new Error(`Serviço ${t.servico} não está na lista (${cards.length} viagens: ${vistos}…). Confira a data.`);
+            }
+            // "ESGOTADO" pode aparecer só numa coluna de tarifa (ex.: a PROMO) enquanto as outras
+            // ainda têm preço. Só conta como esgotado o card que não tem nenhum preço em BRL.
+            const temPreco = (c) => /BRL\s*[\d.,]*\d/.test(norm(c.textContent));
+            const disponiveis = lista.filter((c) => temPreco(c) || !/ESGOTADO/i.test(c.textContent));
+            if (!disponiveis.length) throw new Error(`Serviço ${t.servico} (${t.horario}) está esgotado.`);
+            if (disponiveis.length > 1) {
+                throw new Error(`Há ${disponiveis.length} viagens do serviço ${t.servico} às ${t.horario}. Clique na certa e continue manualmente.`);
+            }
+            log('viagem escolhida:', disponiveis[0]);
+            return disponiveis[0];
+        }
+
+        // Linhas da tabela de tarifas: "9  NORMAL  BRL 353,89". Considera só o tipo NORMAL
+        // (fica de fora "CAO E GATO", "GRATUIDADE CRIANÇA" etc.) com vagas suficientes.
+        function tarifaMaisBarata(lista, qtd) {
+            // Texto com espaço entre as células (o textContent junta "9NORMALBRL")
+            const txt = (el) => {
+                const partes = [];
+                const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                while (w.nextNode()) partes.push(w.currentNode.nodeValue);
+                return norm(partes.join(' '));
+            };
+            const qtdBRL = (el) => (txt(el).match(/BRL/g) || []).length;
+
+            // Parte das células com o texto exato "NORMAL" e sobe até a linha (o menor
+            // elemento que tem um preço só). Não depende de a linha ser <tr> ou <div>.
+            const celulas = Array.from(lista.querySelectorAll('*'))
+                .filter((el) => el.children.length === 0 && semAcento(el.textContent) === 'NORMAL');
+            const linhas = [];
+            for (const cel of celulas) {
+                let row = cel.parentElement;
+                while (row && row !== lista.parentElement && qtdBRL(row) === 0) row = row.parentElement;
+                if (row && qtdBRL(row) === 1 && !linhas.includes(row)) linhas.push(row);
+            }
+            const internas = linhas.filter((el) => !linhas.some((o) => o !== el && el.contains(o)));
+
+            const opcoes = internas.map((el) => {
+                const t = txt(el);
+                const disp = +((t.match(/(\d+)\s+NORMAL\b/i) || [])[1] || 0);
+                const valor = preco((t.match(/BRL\s*([\d.,]+)/) || [])[1] || '0');
+                return { el, disp, tipo: 'NORMAL', valor, texto: t };
+            });
+            log('tarifas NORMAL lidas:', opcoes.map((o) => o.texto));
+
+            const validas = opcoes.filter((o) => o.valor > 0 && (o.disp === 0 ? true : o.disp >= qtd));
+            if (!validas.length) {
+                const vistas = opcoes.map((o) => o.texto).join(' / ') || norm(txt(lista)).slice(0, 120);
+                throw new Error(`Nenhuma tarifa NORMAL com ${qtd} vaga(s). Li: ${vistas}`);
+            }
+            return validas.sort((a, b) => a.valor - b.valor)[0];
+        }
+
+
+        // Poltrona no mapa: div.default-seat.vehicle-item. O texto pode trazer o preço junto
+        // ("show-seat-pricing"), então compara só o número do começo.
+        function acharPoltrona(num) {
+            return Array.from(document.querySelectorAll('.vehicle-item.default-seat, .bus-border .vehicle-item'))
+                .find((el) => visivel(el) && (norm(el.textContent).match(/^\d+/) || [''])[0] === String(Number(num)));
+        }
+
+        // Poltrona ocupada: classe de ocupada ou fundo vermelho
+        function ocupada(el) {
+            if (/occupied|ocupad|busy|sold|vendid|unavailable|indispon|reserved|blocked|bloque/i.test(el.className)) return true;
+            const m = getComputedStyle(el).backgroundColor.match(/\d+/g);
+            return !!m && +m[0] > 180 && +m[1] < 110 && +m[2] < 110;
+        }
+
+        // abrir: clica no card da viagem | tarifa: clica na tarifa antes de cada poltrona
+        async function escolherViagemEPoltronas(t, qtd, nome, { abrir = true, tarifa: comTarifa = true, cards = null } = {}) {
+            // 1) Viagem (se a tabela de tarifas já estiver aberta, a viagem já foi escolhida)
+            if (abrir && !listaTarifas()) {
+                const card = cards ? acharViagem(t, cards) : acharViagem(t);
+                toast(`${nome}: abrindo serviço ${t.servico} das ${t.horario}…`);
+                // Tenta alguns pontos do card (centro, número do serviço, preço) até a tarifa abrir
+                const pontos = [
+                    () => cliqueReal(card, 0.5, 0.5),
+                    () => cliqueReal(card.querySelector('.service-col-7') || card, 0.3, 0.5),
+                    () => cliqueReal(card, 0.85, 0.5),
+                    () => card.click(),
+                ];
+                let abriu = false;
+                for (const clicar of pontos) {
+                    clicar();
+                    if (await esperar(listaTarifas, 3000)) { abriu = true; break; }
+                }
+                if (!abriu) throw new Error(`Cliquei no serviço ${t.servico}, mas a tabela de tarifas não abriu.`);
+                await sleep(400);
+            }
+
+            // Desce a tela até o mapa de poltronas e espera as linhas de tarifa carregarem
+            const mapa = await esperar(() => Array.from(document.querySelectorAll('.bus-border')).find(visivel), 3000);
+            if (mapa) {
+                mapa.scrollIntoView({ block: 'center', behavior: 'instant' });
+                await sleep(500);
+            }
+
+            // 2) Para cada poltrona: clica na tarifa NORMAL mais em conta e depois na poltrona.
+            // Depois do clique confere se a poltrona ficou marcada. Se o mapa foi redesenhado
+            // bem na hora (a tarifa recarrega o mapa) o clique se perde: aí tenta de novo.
+            const poltronas = [...new Set((t.poltronas || []).map((n) => String(Number(n))).filter((n) => n !== 'NaN'))];
+            const faltaram = [];
+            let feitas = 0;
+            for (const num of poltronas) {
+                // As vagas da tarifa diminuem conforme as poltronas são marcadas
+                const precisa = Math.max(1, qtd - feitas);
+                let marcada = false;
+                let livre = null; // aparência da poltrona livre, guardada na 1ª tentativa
+                for (let tentativa = 1; tentativa <= 3 && !marcada; tentativa++) {
+                    if (comTarifa) {
+                        let ultimoErro = null;
+                        const tarifa = await esperar(() => {
+                            try { return listaTarifas() && tarifaMaisBarata(listaTarifas(), precisa); }
+                            catch (e) { ultimoErro = e; return null; }
+                        }, 8000, 300);
+                        if (!tarifa) throw ultimoErro || new Error('A tabela de tarifas não carregou.');
+                        log(`${nome}: tarifa`, tarifa.tipo, tarifa.valor, tarifa.el);
+                        toast(`${nome}: tarifa NORMAL BRL ${tarifa.valor.toFixed(2).replace('.', ',')} → poltrona ${num}…`);
+                        cliqueReal(tarifa.el);
+                        await sleep(500);
+                    } else {
+                        toast(`${nome}: poltrona ${num}…`);
+                    }
+
+                    // Espera o mapa parar de mudar (a mesma poltrona por 400 ms seguidos)
+                    const p = await poltronaEstavel(num);
+                    if (!p) throw new Error(`${nome}: poltrona ${num} não encontrada no mapa.`);
+                    // Já está marcada (ex.: o clique anterior pegou atrasado): não clica, senão desmarca
+                    if (pareceMarcada(p) || (livre && assinatura(p) !== livre)) { marcada = true; break; }
+                    if (ocupada(p)) throw new Error(`${nome}: poltrona ${num} está ocupada. Escolha outra e continue manualmente.`);
+
+                    if (!livre) livre = assinatura(p);
+                    log(`${nome}: poltrona ${num} (tentativa ${tentativa})`, p);
+                    cliqueReal(p);
+                    // Ficou marcada quando a aparência dela muda (classe ou cor)
+                    marcada = !!await esperar(() => {
+                        const agora = acharPoltrona(num);
+                        return agora && (pareceMarcada(agora) || assinatura(agora) !== livre);
+                    }, 2500, 150);
+                    if (!marcada) log(`${nome}: poltrona ${num} não marcou, tentando de novo`);
+                    await sleep(marcada ? 500 : 300);
+                }
+                if (marcada) feitas++; else faltaram.push(num);
+            }
+            if (faltaram.length) {
+                throw new Error(`${nome}: não consegui marcar a(s) poltrona(s) ${faltaram.join(', ')}. Marque manualmente e clique em Preencher de novo.`);
+            }
+        }
+
+        // Classe + cor da poltrona: muda quando ela é marcada
+        function assinatura(el) {
+            const cs = getComputedStyle(el);
+            return [el.className, cs.backgroundColor, cs.borderColor, cs.color].join('|');
+        }
+        const pareceMarcada = (el) => /\b(selected|seat-selected|selecionad\w*|chosen|marcad\w*)\b/i.test(el.className);
+
+        async function poltronaEstavel(num) {
+            let ultima = null, desde = 0;
+            return esperar(() => {
+                const p = acharPoltrona(num);
+                if (!p) { ultima = null; return null; }
+                if (p !== ultima) { ultima = p; desde = Date.now(); return null; }
+                if (Date.now() - desde < 400) return null;
+                p.scrollIntoView({ block: 'center', behavior: 'instant' });
+                return p;
+            }, 8000, 100);
+        }
+
+        // ───────────────────────── Conexão ─────────────────────────
+        // Conexão: o 2º trecho sai de onde o 1º chega e termina em OUTRA cidade
+        // (ida e volta termina na origem do 1º). Ex.: BH → Goiânia + Goiânia → Canto do Buriti.
+        const cidadeUF = (t) => semAcento(limparNome(t)).replace(/\s*-\s*/g, '-');
+        function ehConexao(r) {
+            return !!(r.volta && cidadeUF(r.volta.origem) === cidadeUF(r.ida.destino) &&
+                cidadeUF(r.volta.destino) !== cidadeUF(r.ida.origem));
+        }
+
+        // Cabeçalho do mapa: "TRECHO: BELO HORIZONTE - MG → GOIANIA - GO"
+        function trechoDoMapa() {
+            const el = Array.from(document.querySelectorAll('span, div, label, strong, b'))
+                .find((e) => visivel(e) && /^TRECHO:?$/.test(textoProprio(e)));
+            return el ? semAcento(el.parentElement.textContent) : '';
+        }
+
+        // Botões embaixo do mapa (div.seat-map-route-card: "BHZ → GYN", "GYN → CBT")
+        async function irParaMapaDoTrecho(indice, t) {
+            const cards = Array.from(document.querySelectorAll('.seat-map-route-card')).filter(visivel);
+            if (!cards[indice]) throw new Error(`Botão do ${indice + 1}º trecho da conexão não encontrado embaixo do mapa.`);
+            const cidade = partesCidade(t.origem).cidade;
+            const antes = trechoDoMapa();
+            const mapaAntes = Array.from(document.querySelectorAll('.bus-border')).find(visivel);
+            const poltronasAntes = mapaAntes ? Array.from(mapaAntes.querySelectorAll('.vehicle-item')) : [];
+            toast(`Conexão: abrindo o mapa ${norm(cards[indice].textContent)}…`);
+            cliqueReal(cards[indice]);
+            // Segue assim que o mapa trocar: cabeçalho novo, outro mapa visível ou
+            // poltronas antigas fora da tela/substituídas (o que acontecer primeiro)
+            await esperar(() => {
+                const agora = trechoDoMapa();
+                if (agora && agora !== antes && agora.includes(cidade)) return true;
+                const mapa = Array.from(document.querySelectorAll('.bus-border')).find(visivel);
+                if (mapa && mapa !== mapaAntes) return true;
+                if (poltronasAntes.length && poltronasAntes.every((el) => !el.isConnected || !visivel(el))) return true;
+                return false;
+            }, 3000, 100);
+            await sleep(300);
+        }
+
+        // Volta "simples": sai do destino da ida e termina exatamente na origem dela.
+        // Qualquer outra coisa (outro terminal, conexão) vai pela "Nova pesquisa".
+        // Cidade sem o que está entre parênteses: "FORTALEZA (TA MESSEJANA) - CE" -> "FORTALEZA-CE"
+        const cidadeBase = (t) => cidadeUF(t).replace(/\s*\([^)]*\)\s*/g, '');
+
+        // Conexão de verdade: o 2º trecho sai de onde o 1º chega e termina em OUTRA cidade
+        // (não só em outro terminal da cidade de origem, como Messejana).
+        function ehConexaoReal(r) {
+            return !!(r.volta && cidadeUF(r.volta.origem) === cidadeUF(r.ida.destino) &&
+                cidadeBase(r.volta.destino) !== cidadeBase(r.ida.origem));
+        }
+
+        // Cards do grupo "CONEXÃO DE CRUZAMENTO" (aba lateral .trip-group-tab da lista)
+        function cardsConexaoSistema() {
+            const achados = [];
+            const abas = Array.from(document.querySelectorAll('.trip-group-tab'))
+                .filter((el) => visivel(el) && /CONEXAO/.test(semAcento(el.textContent)));
+            for (const aba of abas) {
+                for (let g = aba.parentElement, n = 0; g && n < 5; g = g.parentElement, n++) {
+                    const cs = Array.from(g.querySelectorAll('.sales-service-card')).filter(visivel);
+                    if (cs.length) { cs.forEach((c) => { if (!achados.includes(c)) achados.push(c); }); break; }
+                }
+            }
+            return achados;
+        }
+
+        function precisaNovaPesquisa(r) {
+            if (!r.volta) return false;
+            return !(cidadeUF(r.volta.origem) === cidadeUF(r.ida.destino) &&
+                     cidadeUF(r.volta.destino) === cidadeUF(r.ida.origem));
+        }
+
+        // Link "Nova pesquisa" da barra de baixo (a.lnk.lnk-new-search)
+        async function abrirNovaPesquisa() {
+            const link = await esperar(() => Array.from(document.querySelectorAll('.lnk-new-search, a, button'))
+                .find((el) => visivel(el) && (el.classList.contains('lnk-new-search') || /^NOVA PESQUISA$/.test(semAcento(el.textContent)))), 5000);
+            if (!link) throw new Error('Link "Nova pesquisa" não encontrado na barra de baixo.');
+            toast('Abrindo nova pesquisa…');
+            cliqueReal(link);
+            const abriu = await esperar(() => telaDePesquisa() && !cardsViagem().length, 10000);
+            if (!abriu) throw new Error('Cliquei em "Nova pesquisa", mas o formulário não abriu.');
+            await sleep(500);
+        }
+
+        async function irParaVolta() {
+            const btn = Array.from(document.querySelectorAll('button, a'))
+                .find((b) => visivel(b) && /^VOLTA\b/.test(semAcento(b.textContent)));
+            if (!btn) throw new Error('Botão VOLTA não encontrado.');
+            const antes = cardsViagem()[0];
+            btn.click();
+            // Espera a lista mudar para a da volta
+            await esperar(() => cardsViagem()[0] && cardsViagem()[0] !== antes && !listaTarifas(), 10000);
+            await sleep(400);
+        }
+
+        // ───────────────────────── Etapa 1: pesquisa ─────────────────────────
+        // A pesquisa terminou sem nenhuma viagem (aviso "Nenhuma viagem..." / "Nenhum resultado"),
+        // sem contar o "Nenhuma viagem de volta" do cabeçalho de uma pesquisa só de ida.
+        function semResultados() {
+            return Array.from(document.querySelectorAll('div, span, p, h1, h2, h3, h4, h5, strong'))
+                .some((el) => el.children.length === 0 && visivel(el) &&
+                    /^NENHUM(A)?\s+(VIAGEM|RESULTADO|SERVICO)/.test(semAcento(el.textContent)) &&
+                    !/DE VOLTA/.test(semAcento(el.textContent)));
+        }
+
+        // permitirVazio: em vez de dar erro quando não vem nenhuma viagem, devolve false
+        async function pesquisar(ida, volta, { permitirVazio = false } = {}) {
+            const selects = Array.from(document.querySelectorAll('.select2-selection--single')).filter(visivel);
+            const selOrigem = campoPorRotulo('Origem', '.select2-selection--single') || selects[0];
+            const selDestino = campoPorRotulo('Destino', '.select2-selection--single') || selects[1];
+            if (!selOrigem || !selDestino) throw new Error('Campos de origem/destino não encontrados.');
+
+            toast(`Origem: ${ida.origem}…`);
+            await escolherSelect2(selOrigem, ida.origem);
+            toast(`Destino: ${ida.destino}…`);
+            await escolherSelect2(selDestino, ida.destino);
+
+            const datas = Array.from(document.querySelectorAll('input.hasDatepicker')).filter(visivel);
+            const inIda = campoPorRotulo('Data de ida', 'input.hasDatepicker') || datas[0];
+            const inVolta = campoPorRotulo('Data de volta', 'input.hasDatepicker') || datas[1];
+            if (!inIda) throw new Error('Campo "Data de ida" não encontrado.');
+            preencherData(inIda, ida.data);
+            if (volta?.data) {
+                if (!inVolta) throw new Error('Campo "Data de volta" não encontrado.');
+                preencherData(inVolta, volta.data);
+            }
+            await sleep(300);
+
+            const btn = Array.from(document.querySelectorAll('button.btn-blue, button'))
+                .find((b) => visivel(b) && /PESQUISAR/i.test(b.textContent));
+            if (!btn) throw new Error('Botão Pesquisar não encontrado.');
+            btn.click();
+            toast(`Pesquisando ${ida.origem} → ${ida.destino}…`);
+            const inicio = Date.now();
+            const res = await esperar(() => {
+                if (cardsViagem().length) return 'lista';
+                if (permitirVazio && Date.now() - inicio > 2500 && semResultados()) return 'vazio';
+                return null;
+            }, permitirVazio ? 15000 : 20000);
+            if (res !== 'lista') {
+                if (permitirVazio) return false;
+                throw new Error('A lista de viagens não carregou.');
+            }
+            await sleep(500);
+            return true;
+        }
+
+        // ───────────────────────── Etapa 3: dados dos passageiros ─────────────────────────
+        function cpfValido(v) {
+            const c = String(v || '').replace(/\D/g, '');
+            if (c.length !== 11 || /^(\d)\1+$/.test(c)) return false;
+            const dv = (n) => {
+                let soma = 0;
+                for (let i = 0; i < n; i++) soma += +c[i] * (n + 1 - i);
+                const r = (soma * 10) % 11;
+                return r === 10 ? 0 : r;
+            };
+            return dv(9) === +c[9] && dv(10) === +c[10];
+        }
+
+        // Texto "próprio" do elemento (só os textos diretos, sem os filhos):
+        // <label><span>*</span> Nome</label> → "Nome"
+        const textoProprio = (el) => semAcento(Array.from(el.childNodes)
+            .filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join(' ')).replace(/^\*\s*|\s*\*$/g, '');
+
+        // Rótulos com o texto exato, em label/span/div/p…
+        function rotulos(raiz, rotulo) {
+            const alvo = semAcento(rotulo);
+            return Array.from(raiz.querySelectorAll('label, span, div, p, small, strong'))
+                .filter((el) => textoProprio(el) === alvo && visivel(el));
+        }
+
+        const inputUtil = (i) => visivel(i) && i.type !== 'hidden' && !i.readOnly &&
+            !i.classList.contains('select2-search__field') && !i.closest('#ps-reserva-captura');
+
+        // Input perto do rótulo (no mesmo grupo), dentro do bloco
+        function campoNoBloco(bloco, rotulo, seletor = 'input') {
+            for (const l of rotulos(bloco, rotulo)) {
+                if (l.htmlFor) {
+                    const f = document.getElementById(l.htmlFor);
+                    if (f && bloco.contains(f)) return f;
+                }
+                for (let box = l.parentElement, n = 0; box && bloco.contains(box) && n < 3; box = box.parentElement, n++) {
+                    const c = Array.from(box.querySelectorAll(seletor)).find(inputUtil);
+                    if (c) return c;
+                }
+            }
+            return null;
+        }
+
+        // Um bloco por campo "Nome" do formulário: sobe a partir do input do Nome até o
+        // container que também tem RG, sem chegar no bloco de outro passageiro.
+        function blocosPassageiro() {
+            const nomes = [];
+            for (const l of rotulos(document.body, 'Nome')) {
+                for (let box = l.parentElement, n = 0; box && n < 3; box = box.parentElement, n++) {
+                    const c = Array.from(box.querySelectorAll('input')).find(inputUtil);
+                    if (c) { if (!nomes.includes(c)) nomes.push(c); break; }
+                }
+            }
+            return nomes.map((inputNome, i) => {
+                let box = inputNome.parentElement;
+                while (box && box !== document.body) {
+                    const outros = nomes.filter((n) => n !== inputNome && box.contains(n));
+                    if (outros.length) return null;
+                    if (campoNoBloco(box, 'RG') && campoNoBloco(box, 'Telefone')) break;
+                    box = box.parentElement;
+                }
+                if (!box || box === document.body) return null;
+                // Sobe mais um pouco para pegar o título "Passageiro #N", se houver
+                let card = box;
+                for (let k = 0; k < 3 && card.parentElement; k++) {
+                    const pai = card.parentElement;
+                    if (nomes.some((n) => n !== inputNome && pai.contains(n))) break;
+                    card = pai;
+                }
+                const m = norm(card.textContent).match(/Passageiro\s*#\s*(\d+)/i);
+                return { num: m ? +m[1] : i + 1, box: card };
+            }).filter(Boolean);
+        }
+
+        function digitar(input, valor) {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            input.focus();
+            setter.call(input, valor);
+            ['input', 'keyup', 'change'].forEach((t) => input.dispatchEvent(new Event(t, { bubbles: true })));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+
+        // Botão "PASSAGEIROS" da barra de baixo, que leva ao formulário dos passageiros
+        async function irParaPassageiros() {
+            if (blocosPassageiro().length) return;
+            const btn = await esperar(() => Array.from(document.querySelectorAll('button.btn-blue, button'))
+                .find((b) => visivel(b) && /^PASSAGEIROS\b/.test(semAcento(b.textContent))), 5000);
+            if (!btn) throw new Error('Botão PASSAGEIROS não encontrado.');
+            toast('Indo para os passageiros…');
+            cliqueReal(btn);
+        }
+
+        async function preencherPassageiros(passageiros) {
+            const inicial = await esperar(() => { const b = blocosPassageiro(); return b.length ? b : null; }, 10000);
+            if (!inicial) throw new Error('Formulário dos passageiros não encontrado.');
+            log(`${inicial.length} bloco(s) de passageiro:`, inicial);
+
+            // A página pode redesenhar o formulário depois de cada campo preenchido, então
+            // o bloco e o campo são procurados de novo a cada passo (nunca reaproveitados).
+            const bloco = (i) => blocosPassageiro()[i];
+            const faltou = [];
+
+            // Um bloco por passageiro do JSON. Se o próximo bloco ainda não estiver na tela,
+            // desce até o fim do último bloco preenchido e espera ele aparecer.
+            const total = Math.max(passageiros.length, inicial.length);
+            for (let i = 0; i < total; i++) {
+                let b0 = bloco(i);
+                if (!b0) {
+                    const anterior = bloco(i - 1);
+                    if (anterior) anterior.box.scrollIntoView({ block: 'end', behavior: 'instant' });
+                    window.scrollBy(0, 300);
+                    b0 = await esperar(() => {
+                        const b = bloco(i);
+                        if (!b) window.scrollBy(0, 200);
+                        return b;
+                    }, 6000, 300);
+                }
+                if (!b0) { faltou.push(`bloco do passageiro #${i + 1}`); continue; }
+                const p = passageiros[(b0.num - 1) % passageiros.length];
+                if (!p) continue;
+                toast(`Passageiro #${b0.num}: ${p.nome}…`);
+                b0.box.scrollIntoView({ block: 'center', behavior: 'instant' });
+                await sleep(200);
+
+                const doc = String(p.documento || '').replace(/\s/g, '');
+                const campos = [
+                    ['Nome', p.nome],
+                    ['Telefone', String(p.telefone || '').replace(/\D/g, '')],
+                    ['RG', doc],                                              // RG é obrigatório: sempre vai o documento
+                    ['CPF', cpfValido(doc) ? doc.replace(/\D/g, '') : null],  // CPF só se for um CPF válido
+                ];
+                for (const [rotulo, valor] of campos) {
+                    if (valor == null || valor === '') continue;
+                    const b = bloco(i);
+                    const input = b && campoNoBloco(b.box, rotulo);
+                    if (!input) { faltou.push(`#${b0.num} ${rotulo}`); continue; }
+                    input.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    digitar(input, valor);
+                    await sleep(150);
+                }
+
+                const b = bloco(i);
+                const nasc = b && (campoNoBloco(b.box, 'Data de nascimento', 'input.hasDatepicker') || campoNoBloco(b.box, 'Data de nascimento'));
+                if (nasc) { nasc.scrollIntoView({ block: 'center', behavior: 'instant' }); preencherData(nasc, p.nascimento || NASCIMENTO_PADRAO); }
+                else faltou.push(`#${b0.num} Data de nascimento`);
+                await sleep(300);
+            }
+
+            // Confere: todo bloco precisa ter o Nome preenchido
+            const vazios = blocosPassageiro().filter(({ box }) => !campoNoBloco(box, 'Nome')?.value).map((b) => `#${b.num}`);
+            if (vazios.length) faltou.push(`Nome vazio em ${vazios.join(', ')}`);
+            if (faltou.length) throw new Error(`Não consegui preencher: ${faltou.join(', ')}.`);
+        }
+
+        // ───────────────────────── Fluxo ─────────────────────────
+        // Continua de onde a tela estiver: pesquisa → viagem da ida → volta.
+        // Se parar no meio (ex.: duas viagens iguais), resolva e clique de novo.
+        let rodando = false;
+        let poltronasFeitas = false;
+        async function fazerReserva(dados) {
+            if (rodando) return;
+            const naPesquisa = telaDePesquisa();
+            const temPassageiros = blocosPassageiro().length > 0;
+            if (!naPesquisa && !cardsViagem().length && !temPassageiros) {
+                toast('Abra a tela "Nova pesquisa para reserva" ou "para venda".', true);
+                return;
+            }
+            const r = dados || lerReservaSalva();
+            if (!r) return;
+            const { ida, volta } = r;
+            const qtd = Math.max(1, r.passageiros?.length || ida.poltronas.length);
+            // 2º trecho que não volta exatamente para a origem (outro terminal, como Messejana,
+            // ou uma conexão A → B, B → C): a ida é feita normal e o 2º trecho vem de uma
+            // "Nova pesquisa", que deixa a ida guardada.
+            // Tipos de reserva com 2º trecho:
+            //  - ida e volta normal: volta sai do destino e termina na origem;
+            //  - conexão (A → B, B → C): tenta a "CONEXÃO DE CRUZAMENTO" do sistema, pesquisando
+            //    só de ida A → C. Se o sistema não tiver, faz pela "Nova pesquisa";
+            //  - outro terminal (ex.: volta para Messejana) ou trechos soltos: "Nova pesquisa".
+            let novaPesquisa = precisaNovaPesquisa(r);
+            const conexao = ehConexaoReal(r);
+            if (conexao) log('Conexão:', ida.origem, '→', ida.destino, '→', volta.destino);
+            else if (novaPesquisa) log('2º trecho por nova pesquisa:', volta.origem, '→', volta.destino);
+            if (conexao && trechoAtual === 'ida') trechoAtual = 'conexao';
+
+            rodando = true;
+            try {
+                // Já na etapa de passageiros (ex.: clicou de novo depois de um aviso)
+                const soPassageiros = poltronasFeitas || (temPassageiros && !cardsViagem().length);
+
+                if (!soPassageiros) {
+                    if (trechoAtual === 'conexao') {
+                        if (naPesquisa && !cardsViagem().length) {
+                            toast(`Conexão: pesquisando só de ida ${ida.origem} → ${volta.destino}…`);
+                            await pesquisar({ ...ida, destino: volta.destino }, null, { permitirVazio: true });
+                        }
+                        // Card da conexão montada: mesmo serviço do 1º trecho e, se souber, a mesma
+                        // chegada do 2º (senão o sistema pode estar juntando outro 2º trecho)
+                        const doSistema = cardsConexaoSistema().filter((c) =>
+                            !volta.chegada || norm(c.textContent).includes(volta.chegada));
+                        log(`${doSistema.length} card(s) em CONEXÃO DE CRUZAMENTO:`, doSistema.map(codigoServico));
+                        if (doSistema.some((c) => codigoServico(c) === String(ida.servico))) {
+                            // A conexão existe no sistema: um card só, com os dois trechos
+                            await escolherViagemEPoltronas(ida, qtd, '1º trecho', { cards: doSistema });
+                            await irParaMapaDoTrecho(1, volta);
+                            await escolherViagemEPoltronas(volta, qtd, '2º trecho', { abrir: false, tarifa: false });
+                            trechoAtual = 'fim';
+                        } else {
+                            // Não tem no sistema: refaz como ida e volta A ↔ B e o 2º trecho por nova pesquisa
+                            toast('Essa conexão não aparece no sistema. Fazendo pela nova pesquisa…');
+                            await abrirNovaPesquisa();
+                            await pesquisar(ida, volta);
+                            novaPesquisa = true;
+                            trechoAtual = 'ida';
+                        }
+                    }
+
+                    // 1ª pesquisa: ida normal, com a data do 2º trecho na volta
+                    if (trechoAtual === 'ida' && naPesquisa && !cardsViagem().length) {
+                        await pesquisar(ida, volta);
+                    }
+                    if (trechoAtual === 'ida') {
+                        await escolherViagemEPoltronas(ida, qtd, 'Ida');
+                        if (volta) trechoAtual = novaPesquisa ? 'nova-pesquisa' : 'volta';
+                        if (volta && !novaPesquisa) {
+                            toast('Ida pronta. Indo para a volta…');
+                            await irParaVolta();
+                        }
+                    }
+                    if (trechoAtual === 'nova-pesquisa') {
+                        // Origem = onde o 2º trecho termina, destino = de onde ele sai.
+                        // Assim a lista da VOLTA dessa pesquisa é exatamente o 2º trecho.
+                        if (!telaDePesquisa()) await abrirNovaPesquisa();
+                        toast(`Ida pronta. Nova pesquisa: ${volta.destino} ↔ ${volta.origem}…`);
+                        await pesquisar({ ...ida, origem: volta.destino, destino: volta.origem }, volta);
+                        trechoAtual = 'volta-nova-pesquisa';
+                        toast('Indo para a volta (a ida continua guardada)…');
+                        await irParaVolta();
+                    }
+                    if ((trechoAtual === 'volta' || trechoAtual === 'volta-nova-pesquisa') && volta) {
+                        await escolherViagemEPoltronas(volta, qtd, novaPesquisa ? '2º trecho' : 'Volta');
+                    }
+                    poltronasFeitas = true;
+                }
+
+                await irParaPassageiros();
+                await preencherPassageiros(r.passageiros || []);
+                toast('Passageiros preenchidos. Confira os dados e finalize a reserva.');
+            } catch (e) {
+                console.error('[Reserva automática]', e);
+                toast(e.message, true);
+            } finally {
+                rodando = false;
+            }
+        }
+
+        // ───────────────────────── Avisos (toast) ─────────────────────────
+        // O Shadow DOM agora guarda só o aviso. O botão "Copiar reserva" fica dentro do card.
+        const host = document.createElement('div');
+        host.id = 'ps-reserva-captura-painel';
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = `
+        <style>
+            :host { all: initial; }
+            * { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+            .toast {
+                position: fixed; right: 20px; bottom: 140px; z-index: 2147483001; max-width: 340px;
+                background: #0f172a; color: #fff; padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.4; white-space: pre-line;
+                opacity: 0; transition: opacity .2s; pointer-events: none;
+            }
+            .toast.show { opacity: 1; }
+            .toast.warn { background: #92400e; }
+        </style>
+        <div class="toast" id="toast"></div>
+        `;
+
+        function toast(msg, warn = false) {
+            const t = root.getElementById('toast');
+            t.textContent = msg;
+            t.classList.toggle('warn', warn);
+            t.classList.add('show');
+            clearTimeout(toast._t);
+            toast._t = setTimeout(() => t.classList.remove('show'), warn ? 7000 : 3500);
+        }
+
+        // ───────────────────────── Botão "Copiar reserva" (dentro do card) ─────────────────────────
+        const BTN_COPIAR_ID = 'ps-copiar-reserva-btn';
+
+        // Lê a tela e copia o JSON da reserva
+        function copiarReserva() {
+            const r = capturarTela();
+            if (!r.ida.origem && !r.ida.servico) {
+                toast('Nada encontrado. Abra a tela da reserva.', true);
+                return;
+            }
+            const json = JSON.stringify(r, null, 2);
+            GM_setClipboard(json, 'text');
+            GM_setValue(STORAGE_KEY, r);
+            console.log('[Captura de Reserva]', r);
+
+            const f = faltando(r);
+            toast(
+                `Copiado: ${r.ida.origem} → ${r.ida.destino}` + (r.volta ? " (ida e volta)" : "") + (f.length ? `\nNão encontrado: ${f.join(', ')}` : ''),
+                f.length > 0
+            );
+
+            const btn = document.getElementById(BTN_COPIAR_ID);
+            if (btn) {
+                btn.textContent = '✓ Copiado!';
+                setTimeout(() => { btn.textContent = '🎫 Copiar reserva'; }, 1500);
+            }
+        }
+
+        // Coloca o botão no primeiro .card-coupon-area (mesmo card do "Copiar Trecho")
+        function colocarBotaoCopiar() {
+            const card = document.querySelector('.card-coupon-area');
+            if (!card) return;
+            if (card.querySelector('#' + BTN_COPIAR_ID)) return;
+
+            const btn = document.createElement('button');
+            btn.id = BTN_COPIAR_ID;
+            btn.type = 'button';
+            btn.textContent = '🎫 Copiar reserva';
+            btn.title = 'Copiar dados da reserva';
+            btn.style.cssText = `
+                margin-top: 35px;
+                margin-left: 8px;
+                padding: 10px 14px;
+                background: #2563eb;
+                color: #fff;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 13px;
+                font-weight: bold;
+                box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35);
+                transition: background 0.15s ease;
+            `;
+            btn.addEventListener('mouseenter', () => { btn.style.background = '#1d4ed8'; });
+            btn.addEventListener('mouseleave', () => { btn.style.background = '#2563eb'; });
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                copiarReserva();
+            });
+
+            card.appendChild(btn);
+        }
+
+        // ───────────────────────── Caixa "Colar reserva" na tela de pesquisa ─────────────────────────
+        // Fica no espaço vazio ao lado do botão PESQUISAR. Ao colar o JSON copiado, a reserva começa.
+        const CAIXA_ID = 'ps-colar-reserva';
+
+        function lerJson(texto) {
+            const t = String(texto || '').trim();
+            const ini = t.indexOf('{'), fim = t.lastIndexOf('}');
+            if (ini < 0 || fim < ini) return null;
+            try {
+                const r = JSON.parse(t.slice(ini, fim + 1));
+                if (!r || !r.ida || !r.ida.origem) return null;
+                // JSON copiado em versões antigas pode ter a observação "(term adicional ...)" no nome
+                for (const tr of [r.ida, r.volta]) {
+                    if (tr) { tr.origem = limparNome(tr.origem); tr.destino = limparNome(tr.destino); }
+                }
+                return r;
+            } catch { return null; }
+        }
+
+        function iniciarPeloJson(caixa, texto) {
+            const r = lerJson(texto);
+            if (!r) {
+                caixa.style.borderColor = '#dc2626';
+                toast('Isso não parece o JSON copiado da reserva.', true);
+                return;
+            }
+            caixa.style.borderColor = '#16a34a';
+            caixa.value = `${r.ida.origem} → ${r.ida.destino} · ${r.ida.data}` +
+                (r.volta ? (ehConexaoReal(r) ? ` → ${r.volta.destino} em ${r.volta.data} (conexão)` : precisaNovaPesquisa(r) ? ` + ${r.volta.origem} → ${r.volta.destino} em ${r.volta.data} (nova pesquisa)` : ` (volta ${r.volta.data})`) : '') +
+                ` · ${(r.passageiros || []).length} passageiro(s)`;
+            GM_setValue(STORAGE_KEY, r);
+            // Reserva nova: começa do zero
+            trechoAtual = 'ida';
+            poltronasFeitas = false;
+            fazerReserva(r);
+        }
+
+        // Títulos "Nova pesquisa para reserva" / "para venda", com ou sem "fiscal"
+        // (o selo "fiscal" pode vir junto no texto ou num elemento separado)
+        function titulosPesquisa() {
+            const achados = [];
+            const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            while (w.nextNode()) {
+                const n = w.currentNode;
+                if (/^\s*Nova pesquisa para (reserva|venda)(\s+fiscal)?\s*$/i.test(n.nodeValue) && visivel(n.parentElement)) {
+                    achados.push(n.parentElement);
+                }
+            }
+            return achados;
+        }
+
+        // Mesmo lugar e mesmo visual da caixa do "Preencher Trecho":
+        // dentro da 3ª ".col-button-only" da tela de pesquisa.
+        function lugarDaCaixa(card) {
+            const cols = Array.from(card.querySelectorAll('.col-button-only'));
+            if (cols[2]) return cols[2];
+            const global = document.querySelectorAll('.col-button-only')[2];
+            if (global && card.contains(global)) return global;
+            return cols[cols.length - 1] || null;
+        }
+
+        // Coloca uma caixa em cada tela de pesquisa aberta (normal e fiscal)
+        function colocarCaixa() {
+            for (const titulo of titulosPesquisa()) {
+                // Sobe do título até o card que tem o botão PESQUISAR
+                let card = titulo.parentElement, btn = null;
+                for (let n = 0; card && n < 10 && !btn; n++, card = btn ? card : card.parentElement) {
+                    btn = Array.from(card.querySelectorAll('button'))
+                        .find((b) => visivel(b) && /PESQUISAR/i.test(b.textContent));
+                }
+                if (!btn || !card) continue;
+                if (card.querySelector('.' + CAIXA_ID + '-area')) continue;
+                const lugar = lugarDaCaixa(card);
+                if (!lugar) continue;
+
+                const wrapper = document.createElement('div');
+                wrapper.className = CAIXA_ID + '-area';
+                wrapper.style.cssText = `
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                    margin-top: 8px;
+                    padding: 10px;
+                    background: #1c1a1e;
+                    border: 1px solid #322f36;
+                    border-radius: 12px;
+                `;
+
+                const caixa = document.createElement('textarea');
+                caixa.className = CAIXA_ID;
+                caixa.placeholder = 'Cole aqui:';
+                caixa.style.cssText = `
+                    width: 100%;
+                    min-height: 80px;
+                    padding: 8px;
+                    font-size: 13px;
+                    box-sizing: border-box;
+                    background: #162033;
+                    color: #e2e8f0;
+                    border: 1px solid #3a3640;
+                    border-radius: 8px;
+                    outline: none;
+                    resize: vertical;
+                    font-family: inherit;
+                `;
+                caixa.addEventListener('focus', () => { caixa.style.borderColor = '#3b82f6'; });
+                caixa.addEventListener('blur', () => {
+                    if (!/#16a34a|#dc2626|rgb\(22, 163, 74\)|rgb\(220, 38, 38\)/.test(caixa.style.borderColor)) {
+                        caixa.style.borderColor = '#3a3640';
+                    }
+                });
+                // Colar o JSON já começa a reserva
+                caixa.addEventListener('paste', (e) => {
+                    const texto = (e.clipboardData || pageWin.clipboardData)?.getData('text');
+                    if (!texto) return; // deixa colar e trata no "input"
+                    e.preventDefault();
+                    iniciarPeloJson(caixa, texto);
+                });
+                caixa.addEventListener('input', () => {
+                    if (lerJson(caixa.value)) iniciarPeloJson(caixa, caixa.value);
+                });
+
+                const botao = document.createElement('button');
+                botao.type = 'button';
+                botao.textContent = 'Preencher';
+                botao.style.cssText = `
+                    padding: 8px 14px;
+                    background: linear-gradient(135deg, #60a5fa, #2563eb);
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    font-size: 13px;
+                    font-weight: bold;
+                `;
+                botao.addEventListener('mouseenter', () => { botao.style.transform = 'translateY(-1px)'; });
+                botao.addEventListener('mouseleave', () => { botao.style.transform = 'none'; });
+                // Reinicia com o JSON que está na caixa (ou o último copiado, se a caixa só tiver o resumo)
+                botao.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const r = lerJson(caixa.value) || GM_getValue(STORAGE_KEY, null);
+                    if (!r || !r.ida) {
+                        caixa.style.borderColor = '#dc2626';
+                        toast('Cole o JSON copiado da reserva.', true);
+                        return;
+                    }
+                    iniciarPeloJson(caixa, JSON.stringify(r));
+                });
+
+                wrapper.appendChild(caixa);
+                wrapper.appendChild(botao);
+                lugar.appendChild(wrapper);
+            }
+        }
+
+        let intervaloCaixa = null;
+
+        return {
+            id: 'reserva_automatica',
+            name: 'SMART BUS - Copiar e Refazer Reserva',
+            defaultOn: true,
+            fixo: false,
+
+            init() {
+                if (!location.hostname.includes('smarttravelit.com')) return;
+                // Avisos (toast)
+                if (!host.isConnected) document.body.appendChild(host);
+                console.log('[Painel de Scripts] Copiar e Refazer Reserva: ligado');
+                // Botão "Copiar reserva" no card da reserva + caixa "Cole aqui" nas telas de pesquisa.
+                // A tela é refeita pelo sistema ao navegar; recoloca os dois quando precisar.
+                colocarCaixa();
+                colocarBotaoCopiar();
+                intervaloCaixa = setInterval(() => {
+                    colocarCaixa();
+                    colocarBotaoCopiar();
+                }, 1000);
+            },
+
+            destroy() {
+                clearInterval(intervaloCaixa);
+                intervaloCaixa = null;
+                host.remove();
+                document.getElementById(BTN_COPIAR_ID)?.remove();
+                document.querySelectorAll('.' + CAIXA_ID + '-area').forEach((c) => c.remove());
+            }
+        };
+    }
+
+    try {
+        registrarModulo(criarModuloReservaAutomatica());
+    } catch (erro) {
+        console.error('[Painel de Scripts] Erro ao criar "Copiar e Refazer Reserva":', erro);
+    }

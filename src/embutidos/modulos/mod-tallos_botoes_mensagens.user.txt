@@ -1,0 +1,308 @@
+// ==UserScript==
+// @name         Barras e mensagens
+// @version      1.5.0
+// @description  Botões de Mensagens Rápidas (Tallos)
+// @match        *://*.tallos.com.br/*
+// @grupo        Tallos
+// ==/UserScript==
+
+// Este script é um módulo: registrarModulo() liga e desliga o módulo pelo hub,
+// sem precisar recarregar a página.
+    // =========================================================================
+    // MÓDULO 8 — Botões de Mensagens Rápidas (Tallos)
+    // =========================================================================
+    function criarModuloTallosBotoesMensagens() {
+        const GRUPO_ID = 'tallos-botoes-mensagens';
+        const TOOLBAR_SELECTOR = '.ql-toolbar.ql-snow';
+        const EDITOR_SELECTOR = '.ql-editor';
+        const SUGESTAO_SELECTOR = 'button.suggestion-button.tg-btn_tertiary[title="Ver sugestão de resposta"]';
+
+        const MENSAGENS = [
+            { icon: '🤖', title: 'SAUDACAO DIRETA', texto: `Prezado(a) cliente, esse atendimento gerou um protocolo de número: @PROTOCOLO
+
+@SALDACAO @CLIENTE, tudo bem? Me chamo @ATENDENTE, seu agente de viagens. Como posso ajudar?` },
+
+            { icon: '👍', title: 'SIM CLIENTE', texto: `Prezado(a) cliente, esse atendimento gerou um protocolo de número: @PROTOCOLO
+@SALDACAO @CLIENTE, tudo bem? Me chamo @ATENDENTE, seu agente de viagens.
+
+Identificamos que sua tentativa de compra anterior deu erro e foi cancelada. Irei gerar sua nova reserva e acompanhar todo o processo para garantir que seja finalizada com sucesso, conforme sua solicitação.
+` },
+
+            {
+                icon: '🙉',
+                title: 'SIM',
+                texto: `Prezado(a) cliente, esse atendimento gerou um protocolo de número: @PROTOCOLO
+@SALDACAO @CLIENTE, me chamo @ATENDENTE, sou agente de viagens autorizado de todo o grupo Guanabara.
+
+Estarei dando continuidade a seu atendimento.`
+            },
+
+
+            { icon: '🚌', title: 'REMARCACAO', texto: `🚌 Remarcação de Passagem
+
+*Para remarcar, preciso que você envie:*
+📄 Bilhete em PDF ou foto.
+🪪 Foto do RG ou CNH (frente e verso) do titular da passagem.
+🕒 Nova data e horário desejados.
+
+⚠️ Se faltar menos de 3h pro embarque, há multa de 20%. Passagens que já ultrapassaram esse prazo de 3h, a remarcação só pode ser feita para o *MESMO TRECHO*.
+
+🔁 Remarcações anteriores com multa *terão nova cobrança*.
+💵 Se o novo horário for mais caro, *será cobrada a diferença*.
+📍 Em passagens intermunicipais do estado de RJ, alterações só até 1h antes do embarque. Depois disso, o bilhete perde validade.
+Trechos intermunicipais do estado de MG é necessário solicitar até 12h antes.
+Viagens intermunicipais dentro do estado de São Paulo só podem ser remarcadas ou canceladas se solicitado até no máximo 8h antes do horário de partida segundo o Artigo 93 do DECRETO Nº 29.913.
+
+💳 Pagamentos apenas via *PIX CNPJ*.
+💻 Na nossa plataforma, há também uma taxa de serviço para remarcações.
+
+*Qualquer dúvida, estou à disposição!*` },
+
+            { icon: '✈', title: 'TRECHO', texto: `Por gentileza, poderia informar as seguintes informações sobre a sua viagem:
+
+Origem: cidade de partida
+Destino: cidade de chegada
+Data: data da partida da viagem
+
+*Informe se a viagem tem volta*` },
+
+            { icon: 'C', title: 'CINZAS', texto: `Poltronas Cinzas livres, qual deseja?` },
+
+
+            { icon: '⛔', title: 'POLTRONA SENHORA', texto: `A poltrona da senhora vai ficar bloqueada por até 10 minutos devido a tentativa cancelada anteriormente.
+
+1 - Deseja aguardar a mesma liberar
+ou
+2 - Pode ser outra, poltronas cinzas livres.` },
+
+ { icon: '⛔', title: 'POLTRONA SENHOR', texto: `A poltrona do senhor vai ficar bloqueada por até 10 minutos devido a tentativa cancelada anteriormente.
+
+1 - Deseja aguardar a mesma liberar
+ou
+2 - Pode ser outra, cinzas livres.` },
+
+            { icon: '💺', title: 'POLTRONAS', texto: `💺 Mapa de Poltronas
+
+🟩 Verde: poltronas sugeridas / opções de escolha
+⬜ Cinza: poltronas disponíveis
+🟥 Vermelho: poltronas vendidas / ocupadas
+🟧 Laranja: poltronas pendentes / em processo de venda
+
+Por gentileza, escolha a(s) poltrona(s) desejada(s) para dar continuidade ao atendimento.` },
+
+            { icon: '🪪', title: 'DADOS', texto: `Dados do Passageiro -
+Nome:
+RG:
+CPF:
+Data de Nascimento:` },
+
+            { icon: '⚠️', title: 'CONFERE', texto: `*Por gentileza, poderia conferir se todas as informações da sua reserva estão corretas? (Passageiro, Trecho, Data, horário e poltrona*)` },
+
+{ icon: '🔗', title: 'LINK', texto: `Segue link para pagamentos via PIX e cartão, lembrando que para pagamentos via cartão de crédito, os dados do comprador são referentes ao proprietário do cartão.` },
+
+           {
+                icon: '🔗',
+                title: 'CV',
+                texto: `Segue link para pagamento via Cartão de crédito e PIX:\u00A0\u00A0
+
+Passo a passo. (CARTÃO)
+1. Preencher os dados em comprador e pagamento referente ao titular do cartão.
+2. Gere um novo virtual ou tente com um cartão diferente dos usados anteriormente.
+3. Limpar os dados ou abrir uma nova guia no navegador.
+4. CEP da fatura, preencher referente ao CEP em que foi feito o pedido do cartão (físico).
+5. Ao solicitar o token de confirmação da compra, verificar e aceitar no banco.`
+            },
+
+            { icon: '❖', title: 'PIX', texto: `Segue abaixo os dados bancários para transferência via PIX!
+
+Valor: R$
+
+Nome: VALE VIAGENS/ ANTÔNIO CLERVES
+CHAVE CNPJ: 18.826.066/0001-09
+
+Emissão da passagem mediante ao envio do comprovante de pagamento!` },
+
+            { icon: '🏁', title: 'COMPRA FIM', texto: `Sua compra foi efetuada com sucesso!
+Peço que verifique o e-mail cadastrado na hora da compra (caixa de entrada e spam) por gentileza, pode levar ate 15 minutos para a passagens chegarem no e-mail!
+
+Posso ajudar em mais alguma coisa?` },
+
+            { icon: '🔎', title: 'VERIFICA', texto: `Confira se os dados do seu bilhete estão corretos
+Verifique trecho, data, horário e dados pessoais.` },
+
+            { icon: '🤔', title: 'AGRADECE', texto: `Agradeço o contato, confiança e preferência em nosso trabalho. Ficamos à disposição para lhe atender posteriormente.
+
+@SALDACAO e uma excelente viagem.` },
+
+            { icon: '🤔', title: 'DUVIDA', texto: `📍 Informações importantes para o embarque
+
+📄 Documentos aceitos (originais):
+• CIN/RG (físico ou digital pelo app Gov.br)
+• CNH (física ou digital pelo app Carteira Digital de Trânsito)
+• Carteira de Trabalho (física)
+• Passaporte ou RIC
+• e-Título (no aplicativo, com foto visível)
+👶 Viagem de menores
+• Até 6 anos incompletos: podem viajar gratuitamente no colo de um responsável pagante, conforme disponibilidade.
+• Até 12 anos: apresentar certidão de nascimento, RG ou passaporte (originais). Também aceitamos RG digital pelo Gov.br e cópia autenticada em cartório.
+• A partir de 12 anos: apresentar RG ou passaporte (original). Também aceitamos RG digital pelo Gov.br e cópia autenticada em cartório.
+👩‍👧 Menores de 16 anos acompanhados
+
+Podem viajar com pais, avós, irmãos maiores de 18 anos, tios, sobrinhos maiores de 18 anos, tutores ou guardiões legais, desde que seja possível comprovar o parentesco por meio de documentos originais.
+
+👥 Acompanhante sem parentesco
+É necessário que seja maior de 18 anos e apresente autorização dos pais ou responsáveis, com firma reconhecida em cartório. Modelos disponíveis em: https://autoriza.net.
+
+👦 Menor de 16 anos desacompanhado
+Só pode viajar com documento de identidade e autorização dos pais ou responsáveis, com firma reconhecida em cartório. Modelos disponíveis em: https://autoriza.net.
+
+✅ Adolescentes de 16 a 18 anos
+Podem viajar sozinhos, sem autorização, desde que apresentem documento de identidade original e válido.
+
+⚠️ Os horários podem sofrer alterações, pois os ônibus estão sujeitos às condições da viagem e do trânsito.
+Estamos à disposição 24h. Qualquer dúvida, é só chamar! 😊` },
+
+            { icon: '🛂', title: 'EMBARQUE', texto: `Basta mostrar o PDF do bilhete ao motorista pela tela do celular junto com o documento original físico com foto, mas caso deseje imprimir os bilhetes, basta se dirigir até o guichê e imprimir o bilhete.` },
+
+            { icon: '🛎️', title: 'RESERVA', texto: `Estarei gerando a reserva do(a) senhor(a) para darmos continuidade por aqui, tudo bem?` },
+
+            { icon: '🔁', title: 'CONTINUIDADE', texto: `@CLIENTE, caso deseje dar continuidade, será criada uma reserva conforme sua solicitação anterior,
+
+Gostaria de dar continuidade a sua reserva agora mesmo?` },
+
+            { icon: '📢', title: 'FALTA DE COMUNICACAO', texto: `Atendimento interrompido por falta de comunicação. Se desejar, estamos disponíveis para continuar a atendê-lo(a).
+
+Lembrando que nosso atendimento é 24 horas e 100% humanizado, além de fornecemos suporte durante toda sua viagem!` },
+
+            { icon: '☎️', title: 'SAC', texto: `SAC: 0800 728 1992 - Opção 1, em seguida opção 9 e opção 1 novamente` },
+
+            { icon: '🙌', title: 'CONSEGUIU FINALIZAR', texto: `Que bom que deu tudo certo!, Tenha uma ótima viagem! Lembre-se que estamos disponíveis pelo WhatsApp para te ajudar no que precisar.
+
+Comprando conosco por aqui, além dos melhores valores de tarifação e atendimento 100% humanizado, você terá suporte durante toda a sua viagem!, lembrando que esse é um portal de vendas 24 horas
+
+Salve já nosso contato para as suas próximas adesões.` },
+
+            { icon: '📁', title: 'DOCUMENTO', texto: `Me envia o bilhete e documento do titular por favor` },
+
+            { icon: '❌ ', title: 'ERRO', texto: `Provavelmente houve algum erro durante o preenchimento dos dados ou uma instabilidade no sistema, o que fez com que o pagamento não fosse reconhecido corretamente.
+Para darmos continuidade, estarei gerando uma nova reserva para o(a) senhor(a). Tudo bem?` },
+        ];
+
+        let styleEl = null;
+        let observer = null;
+
+        function esconderSugestaoResposta() {
+            document.querySelectorAll(SUGESTAO_SELECTOR).forEach(btn => {
+                btn.style.display = 'none';
+            });
+        }
+
+        // Adicionado: sem isso o destroy() não desfazia o que o init() escondia
+        function mostrarSugestaoResposta() {
+            document.querySelectorAll(SUGESTAO_SELECTOR).forEach(btn => {
+                btn.style.display = '';
+            });
+        }
+
+        function inserirTexto(texto, btn) {
+            const editor = document.querySelector(EDITOR_SELECTOR);
+            if (!editor) return;
+
+            editor.innerHTML = texto
+                .replace(/\r/g, '')
+                .split('\n')
+                .map(l => l.trim() === '' ? '<p><br></p>' : `<p>${l}</p>`)
+                .join('');
+
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+
+            const original = btn.innerHTML;
+            btn.innerHTML = '✅';
+            setTimeout(() => btn.innerHTML = original, 800);
+        }
+
+        function inserirBotoes() {
+            const toolbar = document.querySelector(TOOLBAR_SELECTOR);
+            if (!toolbar || document.getElementById(GRUPO_ID)) return;
+
+            const grupo = document.createElement('div');
+            grupo.id = GRUPO_ID;
+            grupo.style.cssText = `display:flex;gap:3px;margin-right:15px;`;
+
+            MENSAGENS.forEach(msg => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.innerHTML = msg.icon;
+                btn.setAttribute('data-tooltip', msg.title);
+                btn.style.cssText = `
+                    width:28px;height:28px;background:transparent;border:none;
+                    border-radius:6px;font-size:16px;cursor:pointer;opacity:.75;
+                    display:flex;align-items:center;justify-content:center;
+                `;
+                btn.onmouseenter = () => btn.style.opacity = '1';
+                btn.onmouseleave = () => btn.style.opacity = '.75';
+                btn.onclick = () => inserirTexto(msg.texto, btn);
+                grupo.appendChild(btn);
+            });
+
+            toolbar.insertBefore(grupo, toolbar.firstChild);
+        }
+
+        return {
+            id: 'tallos_botoes_mensagens',
+            name: 'TALLOS - Barras e mensagens',
+            defaultOn: true,
+            fixo: true, // módulo embutido no código-fonte, não pode ser excluído pelo painel
+
+            init() {
+                // este widget só faz sentido no chat do Tallos (era @match .../app/chat*)
+                if (!location.hostname.includes('tallos.com.br') || !location.pathname.includes('/app/chat')) return;
+
+                styleEl = document.createElement('style');
+                styleEl.innerHTML = `
+                    #${GRUPO_ID} button { position: relative; }
+                    #${GRUPO_ID} button::after {
+                        content: attr(data-tooltip);
+                        position: absolute;
+                        top: -34px;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        background: #000;
+                        color: #fff;
+                        padding: 4px 8px;
+                        border-radius: 6px;
+                        font-size: 11px;
+                        white-space: nowrap;
+                        opacity: 0;
+                        pointer-events: none;
+                        transition: opacity .15s ease;
+                        z-index: 9999;
+                    }
+                    #${GRUPO_ID} button:hover::after { opacity: 1; }
+                `;
+                document.head.appendChild(styleEl);
+
+                observer = new MutationObserver(() => {
+                    esconderSugestaoResposta();
+                    inserirBotoes();
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+
+                esconderSugestaoResposta();
+                inserirBotoes();
+            },
+
+            destroy() {
+                if (observer) {
+                    observer.disconnect();
+                    observer = null;
+                }
+                document.getElementById(GRUPO_ID)?.remove();
+                styleEl?.remove();
+                styleEl = null;
+                mostrarSugestaoResposta();
+            }
+        };
+    }
+
+    registrarModulo(criarModuloTallosBotoesMensagens());

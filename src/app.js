@@ -151,12 +151,13 @@ const estadoDoPerfil = p => scriptsPerfil.normalizar(p.id === perfisApp.ativo ? 
 
 // Grava os módulos que vêm com o app na pasta. Se o arquivo em disco é uma versão
 // antiga sem edição, troca pela nova; se você editou, mantém a sua versão.
-// Módulos que já vieram no app e foram tirados: apaga o arquivo e o liga/desliga deles.
-const MODULOS_RETIRADOS = ['mod-leitor_documento', 'mod-idade_nascimento', 'mod-arrasto_promo',
-    'mod-alarme_flutuante', 'mod-colar_trecho_auto', 'mod-guanabara_print_horarios', 'mod-horario-servico',
-    'mod-preencher-email', 'mod-preencher_passageiros', 'mod-remover_acentos_nomes', 'mod-reserva_automatica',
-    'mod-smartbus_copiar_clique', 'mod-tallos_30min', 'mod-tallos_botoes_mensagens',
-    'mod-tallos_ocultar_botoes_barra', 'mod-chatpro_copiar_2'];
+// Módulos que já vieram no app e foram tirados: o arquivo e o liga/desliga somem de todos os perfis.
+const MODULOS_RETIRADOS = [
+    'mod-leitor_documento', 'mod-idade_nascimento', 'mod-arrasto_promo', 'mod-chatpro_copiar_2',
+    'mod-chatpro_barra_mensagens', 'mod-clique_para_copiar', 'mod-copiar_trecho',
+    'mod-credito_horarios_bilhete', 'mod-documento_passageiro', 'mod-info_poltronas', 'mod-tallos_02',
+    'mod-tallos_barra_mensagens', 'mod-trocar_login_smart'
+];
 
 function prepararArquivosScripts() {
     if (migracaoPendente && perfisApp.formatoScripts !== FORMATO_SCRIPTS) migrarScriptsParaPerfis();
